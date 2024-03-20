@@ -4,16 +4,16 @@
 
 #include "Engine/Scripting/ScriptingObject.h"
 #include "WorldCoordinate.h"
-
+#include "WorldEntity.h"
 #include "ThirdParty/entt/entt.hpp"
 
 //entt::entity is just uint32_t
-using EntityHandle = entt::entity;
-using EntityRegistry = entt::registry;
+using EntityHandle = WorldEntity;
+using EntityRegistry = entt::basic_registry<WorldEntity>;
 
-API_CLASS() class FLAXENGINE_API WorldSector : public ScriptingObject
+API_CLASS() class FLAXENGINE_API WorldSector
 {
-    DECLARE_SCRIPTING_TYPE_WITH_CONSTRUCTOR_IMPL(WorldSector, ScriptingObject);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(WorldSector)
 protected:
     friend class World;
     friend class Entity;
@@ -60,7 +60,7 @@ protected:
     void DestroyEntity(Entity* entity)
     {
         entity->Sector = nullptr;
-        registry.destroy(static_cast<entt::entity>(entity->Handle));
+        registry.destroy(entity);
         Delete(entity);
         entity = nullptr;//clear the pointer
     }

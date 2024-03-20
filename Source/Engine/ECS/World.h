@@ -5,7 +5,6 @@
 #include "Engine/Core/Math/Transform.h"
 #include "Engine/Core/Collections/Dictionary.h"
 #include "WorldSector.h"
-#include "Entity.h"
 
 API_CLASS(Static) class FLAXENGINE_API World
 {
@@ -18,7 +17,7 @@ public:
         return WorldSectors;
     }
 
-    API_FUNCTION() static Entity* CreateEntity(const WorldCoordinate& worldcords)
+    API_FUNCTION() static WorldEntity* CreateEntity(const WorldCoordinate& worldcords)
     {
         auto Sector = WorldSectors[worldcords.SectorCoordinate];
         if(Sector == nullptr)
