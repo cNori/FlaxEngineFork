@@ -21,9 +21,12 @@ namespace FlaxEditor
 
         public void ShowActors(IEnumerable<Actor> actors)
         {
+            var root = UIEditor.UIRoot;
+            if (root == null)
+                return;
+
             // Calculate bounds of all selected objects
             var areaRect = Rectangle.Empty;
-            var root = UIEditor.UIRoot;
             foreach (var actor in actors)
             {
                 Rectangle bounds;
@@ -163,7 +166,7 @@ namespace FlaxEditor
         /// <summary>
         /// True if enable panning and zooming the view.
         /// </summary>
-        public bool EnableCamera => _view != null;
+        public bool EnableCamera => _view != null && EnableBackground;
 
         /// <summary>
         /// Transform gizmo to use sync with (selection, snapping, transformation settings).
@@ -189,9 +192,11 @@ namespace FlaxEditor
 
         internal float ViewScale
         {
-            get => _view.Scale.X;
+            get => _view?.Scale.X ?? 1;
             set
             {
+                if (_view == null)
+                    return;
                 value = Mathf.Clamp(value, 0.1f, 4.0f);
                 _view.Scale = new Float2(value);
             }
@@ -274,6 +279,11 @@ namespace FlaxEditor
                         return true;
                     }
                 }
+                // Allow deselecting if user clicks on nothing
+                else
+                {
+                    owner.Select(null);
+                }
             }
             if (EnableCamera && (button == MouseButton.Right || button == MouseButton.Middle))
             {
@@ -286,12 +296,30 @@ namespace FlaxEditor
                 return true;
             }
 
-            return false;
+            return Focus(this);
         }
 
         public override void OnMouseMove(Float2 location)
         {
             base.OnMouseMove(location);
+
+            // Change cursor if mouse is over active control widget
+            bool cursorChanged = false;
+            if (_widgets != null && _widgets.Count != 0 && !_mouseMovesControl && !_mouseMovesWidget && !_mouseMovesView)
+            {
+                foreach (var widget in _widgets)
+                {
+                    if (widget.Bounds.Contains(ref location))
+                    {
+                        Cursor = widget.Cursor;
+                        cursorChanged = true;
+                    }
+                    else if (Cursor != CursorType.Default && !cursorChanged)
+                    {
+                        Cursor = CursorType.Default;
+                    }
+                }
+            }
 
             var transformGizmo = TransformGizmo;
             if (_mouseMovesControl && transformGizmo != null)
@@ -442,7 +470,7 @@ namespace FlaxEditor
 
         public override void Draw()
         {
-            if (EnableBackground)
+            if (EnableBackground && _view != null)
             {
                 // Draw background
                 Surface.VisjectSurface.DrawBackgroundDefault(Editor.Instance.UI.VisjectSurfaceBackground, Width, Height);
@@ -479,11 +507,11 @@ namespace FlaxEditor
                 {
                     if (IsValidControl(selection[i], out var controlActor))
                     {
-                        DrawControl(controlActor, controlActor.Control, true, ref mousePos, ref drawAnySelectedControl, true);
+                        DrawControl(controlActor, controlActor.Control, true, ref mousePos, ref drawAnySelectedControl, EnableSelecting);
                     }
                 }
             }
-            if (EnableSelecting && !_mouseMovesControl && IsMouseOver)
+            if (EnableSelecting && !_mouseMovesControl && !_mouseMovesWidget && IsMouseOver)
             {
                 // Highlight control under mouse for easier selecting (except if already selected)
                 if (RayCastControl(ref mousePos, out var hitControl) &&
@@ -661,7 +689,7 @@ namespace FlaxEditor
 #else
             // Find any control under mouse (hierarchical)
             hit = GetChildAtRecursive(location);
-            if (hit is View)
+            if (hit is View || hit is CanvasContainer)
                 hit = null;
             return hit != null;
 #endif
