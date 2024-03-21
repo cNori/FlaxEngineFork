@@ -98,6 +98,9 @@ namespace FlaxEditor.Viewport.Previews
 
         private void UpdateLinkage()
         {
+            // Clear flag
+            _hasUILinked = false;
+
             // Link UI canvases to the preview (eg. after canvas added to the prefab)
             LinkCanvas(_instance);
 
@@ -111,6 +114,8 @@ namespace FlaxEditor.Viewport.Previews
                 _uiControlLinked = uiControl;
                 _hasUILinked = true;
             }
+            else if (_uiControlLinked != null)
+                _hasUILinked = true;
         }
 
         private void LinkCanvas(Actor actor)
