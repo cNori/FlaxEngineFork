@@ -3,7 +3,6 @@
 #pragma once
 
 #include "Engine/Scripting/ScriptingObject.h"
-#include "WorldCoordinate.h"
 #include "WorldEntity.h"
 #include "ThirdParty/entt/entt.hpp"
 
@@ -11,8 +10,7 @@
 using EntityHandle = WorldEntity;
 using EntityRegistry = entt::basic_registry<WorldEntity>;
 
-API_CLASS() class FLAXENGINE_API WorldSector
-{
+API_CLASS() class FLAXENGINE_API WorldSector{
     DECLARE_SCRIPTING_TYPE_NO_SPAWN(WorldSector)
 protected:
     friend class World;
@@ -50,18 +48,15 @@ protected:
         return registry.any_of<T>(Handle);
     }
 
-    Entity* CreateEntity()
+    WorldEntity CreateEntity()
     {
-        auto e = New<Entity>();
-        e->Handle = static_cast<uint32_t>(registry.create());
-        e->Sector = this;
+        auto& e = registry.create();
+        e.m_Sector = this;
         return e;
     }
-    void DestroyEntity(Entity* entity)
+    void DestroyEntity(WorldEntity entity)
     {
-        entity->Sector = nullptr;
+        entity.m_Sector = nullptr;
         registry.destroy(entity);
-        Delete(entity);
-        entity = nullptr;//clear the pointer
     }
 };
