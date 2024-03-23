@@ -1,7 +1,8 @@
-// Copyright (c) 2012-2024 Wojciech Figat. All rights reserved.
 
 using Flax.Build;
 using Flax.Build.NativeCpp;
+using System.IO;
+using System.Collections.Generic;
 
 /// <summary>
 /// User Interface module.
@@ -12,6 +13,8 @@ public class ECS : EngineModule
     public override void Setup(BuildOptions options)
     {
         base.Setup(options);
+        options.CompileEnv.PrecompiledHeaderUsage = PrecompiledHeaderFileUsage.None;
+        options.LinkEnv.Output = LinkerOutput.SharedLibrary;
         options.CompileEnv.CppVersion = CppVersion.Cpp17;
     }
 }
