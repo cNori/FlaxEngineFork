@@ -491,16 +491,6 @@ void RigidBody::BeginPlay(SceneBeginData* data)
     PhysicsBackend::SetRigidDynamicActorMaxAngularVelocity(_actor, _maxAngularVelocity);
     PhysicsBackend::SetRigidDynamicActorConstraints(_actor, _constraints);
 
-    // Find colliders to attach
-    for (int32 i = 0; i < Children.Count(); i++)
-    {
-        auto collider = dynamic_cast<Collider*>(Children[i]);
-        if (collider && collider->CanAttach(this))
-        {
-            collider->Attach(this);
-        }
-    }
-
     // Setup mass (calculate or use overriden value)
     UpdateMass();
 
