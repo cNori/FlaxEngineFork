@@ -166,6 +166,16 @@ protected:
     /// </summary>
     void RemoveStaticActor();
 
+#if USE_EDITOR
+    virtual void DrawPhysicsDebug(RenderView& view);
+
+    /// <summary>
+    /// [Editor only] shows collider when it is deselected
+    /// </summary>
+    API_FIELD(public,Attributes = "EditorOrder(200), EditorDisplay(\"Collider\")")
+        bool DisplayCollider = false;
+#endif
+
 private:
     void OnMaterialChanged();
     RigidBody* GetAttathmentRigidbody();
@@ -183,14 +193,12 @@ public:
     void ClosestPoint(const Vector3& point, Vector3& result) const final;
     bool ContainsPoint(const Vector3& point) const final;
 
-#if USE_EDITOR
-    virtual void DrawPhysicsDebug(RenderView& view);
-#endif
-
 protected:
     // [PhysicsColliderActor]
+#if USE_EDITOR
     void OnEnable() override;
     void OnDisable() override;
+#endif
     void BeginPlay(SceneBeginData* data) override;
     void EndPlay() override;
     void OnActiveInTreeChanged() override;
@@ -198,6 +206,5 @@ protected:
     void OnTransformChanged() override;
     void OnParentChangedInHierarchy() override;
     void OnLayerChanged() override;
-    void OnStaticFlagsChanged() override;
     void OnPhysicsSceneChanged(PhysicsScene* previous) override;
 };
