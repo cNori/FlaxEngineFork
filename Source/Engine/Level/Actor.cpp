@@ -612,7 +612,10 @@ void Actor::SetIsActive(bool value)
 
 void Actor::SetStaticFlags(StaticFlags value)
 {
+    if (_staticFlags == value)
+        return;
     _staticFlags = value;
+    OnStaticFlagsChanged();
 }
 
 void Actor::SetTransform(const Transform& value)
@@ -1261,6 +1264,14 @@ void Actor::OnOrderInParentChanged()
 {
     //if (GetScene())
     Level::callActorEvent(Level::ActorEventType::OnActorOrderInParentChanged, this, nullptr);
+}
+
+void Actor::OnStaticFlagsChanged()
+{
+}
+
+void Actor::OnLayerChanged()
+{
 }
 
 BoundingBox Actor::GetBoxWithChildren() const
