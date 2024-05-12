@@ -2506,11 +2506,6 @@ namespace Flax.Build.Bindings
             var enumTypeNameManaged = enumInfo.FullNameManaged;
             var enumTypeNameInternal = enumInfo.FullNameNativeInternal;
 
-            //patch generating bug
-            //if code contains Class::Struct::Enum it will generate Class::Struct_Enum but class don't contains set type
-            var custoff1 = enumTypeNameInternal.LastIndexOf(':') + 1;
-            enumTypeNameInternal = enumTypeNameInternal[custoff1..];
-
             contents.AppendLine();
             contents.AppendFormat("class {0}Internal", enumTypeNameInternal).AppendLine();
             contents.Append('{').AppendLine();
