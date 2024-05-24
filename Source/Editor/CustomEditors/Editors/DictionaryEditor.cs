@@ -156,7 +156,6 @@ namespace FlaxEditor.CustomEditors.Editors
         private bool _readOnly;
         private bool _notNullItems;
         private bool _canEditKeys;
-        private bool _canEditValues;
         private bool _keyEdited;
         private CollectionAttribute.DisplayType _displayType;
 
@@ -190,6 +189,7 @@ namespace FlaxEditor.CustomEditors.Editors
             var collection = (CollectionAttribute)attributes?.FirstOrDefault(x => x is CollectionAttribute);
             if (collection != null)
             {
+                _canEditKeys &= collection.CanReorderItems;
                 _readOnly = collection.ReadOnly;
                 _notNullItems = collection.NotNullItems;
                 if (collection.BackgroundColor.HasValue)
