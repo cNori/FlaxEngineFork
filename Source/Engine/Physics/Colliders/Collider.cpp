@@ -176,7 +176,7 @@ void Collider::Attach(RigidBody* rigidBody)
     {
         PhysicsBackend::SetShapeLocalPose(_shape, _cachedLocalPosePos, _cachedLocalPoseRot);
     }
-    rigidBody->AttatchedColliders.Add(this);
+    rigidBody->AttachedColliders.Add(this);
     rigidBody->OnColliderChanged(this);
 }
 void Collider::Detach()
@@ -188,7 +188,7 @@ void Collider::Detach()
     if (rigidBody)
     {
         rigidBody->OnColliderChanged(this);
-        rigidBody->AttatchedColliders.Remove(this);
+        rigidBody->AttachedColliders.Remove(this);
         AttachedTo = nullptr;
     }
 }
@@ -331,7 +331,7 @@ void Collider::BeginPlay(SceneBeginData* data)
         CreateShape();
 
         // Check if parent is a rigidbody
-        const auto rigidBody = GetAttathmentRigidbody();
+        const auto rigidBody = GetAttachmentRigidbody();
         if (rigidBody && CanAttach(rigidBody))
         {
             // Attach to the rigidbody
@@ -399,7 +399,7 @@ void Collider::OnParentChanged()
         Detach();
 
         // Check if the new parent is a rigidbody
-        RigidBody* rigidBody = GetAttathmentRigidbody();
+        RigidBody* rigidBody = GetAttachmentRigidbody();
         if (rigidBody && CanAttach(rigidBody))
         {
             // Attach to the rigidbody
