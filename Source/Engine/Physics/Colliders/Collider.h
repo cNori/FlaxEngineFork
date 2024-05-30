@@ -200,7 +200,7 @@ protected:
 
 private:
     void OnMaterialChanged();
-    RigidBody* GetAttachmentRigidbody();
+    RigidBody* GetAttachmentRigidBody();
 
     /// <summary>
     /// Calculates _cachedLocalPosePos and _cachedLocalPoseRot
@@ -229,4 +229,6 @@ protected:
     void OnParentChangedInHierarchy() override;
     void OnLayerChanged() override;
     void OnPhysicsSceneChanged(PhysicsScene* previous) override;
+
+    virtual void Internal_SetContactOffset(float value);
 };

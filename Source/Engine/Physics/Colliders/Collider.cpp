@@ -58,9 +58,7 @@ void Collider::SetContactOffset(float value)
     value = Math::Clamp(value, 0.0f, 100.0f);
     if (Math::NearEqual(value, _contactOffset))
         return;
-    _contactOffset = value;
-    if (_shape)
-        PhysicsBackend::SetShapeContactOffset(_shape, _contactOffset);
+    Internal_SetContactOffset(value);
 }
 
 bool Collider::RayCast(const Vector3& origin, const Vector3& direction, float& resultHitDistance, float maxDistance) const
@@ -306,7 +304,7 @@ void Collider::OnMaterialChanged()
         PhysicsBackend::SetShapeMaterial(_shape, Material);
 }
 
-RigidBody* Collider::GetAttachmentRigidbody()
+RigidBody* Collider::GetAttachmentRigidBody()
 {
     RigidBody* rb = nullptr;
     Actor* p = GetParent();
@@ -331,7 +329,7 @@ void Collider::BeginPlay(SceneBeginData* data)
         CreateShape();
 
         // Check if parent is a rigidbody
-        const auto rigidBody = GetAttachmentRigidbody();
+        const auto rigidBody = GetAttachmentRigidBody();
         if (rigidBody && CanAttach(rigidBody))
         {
             // Attach to the rigidbody
@@ -399,7 +397,7 @@ void Collider::OnParentChanged()
         Detach();
 
         // Check if the new parent is a rigidbody
-        RigidBody* rigidBody = GetAttachmentRigidbody();
+        RigidBody* rigidBody = GetAttachmentRigidBody();
         if (rigidBody && CanAttach(rigidBody))
         {
             // Attach to the rigidbody
@@ -478,4 +476,11 @@ bool Collider::CalculateShapeTransform()
         return true;
     }
     return false;
+}
+
+void Collider::Internal_SetContactOffset(float value)
+{
+    _contactOffset = value;
+    if (_shape)
+        PhysicsBackend::SetShapeContactOffset(_shape, _contactOffset);
 }
