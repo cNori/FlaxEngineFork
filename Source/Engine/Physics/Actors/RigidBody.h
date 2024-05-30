@@ -497,7 +497,7 @@ public:
     }
 
     template<typename ColliderType = Collider>
-    ColliderType* GetAttachedCollidersOfType() const
+    ColliderType* GetAttachedColliderOfType() const
     {
         for (auto i = 0; i < AttachedColliders.Count(); i++)
         {
