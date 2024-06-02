@@ -966,7 +966,7 @@ void Actor::EndPlay()
     }
 
     // Cleanup managed object
-    DestroyManaged();
+    //DestroyManaged();
     if (IsRegistered())
         UnregisterObject();
 }
