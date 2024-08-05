@@ -190,6 +190,13 @@ namespace FlaxEditor.Options
         public FlaxEngine.GUI.Orientation ContentWindowOrientation { get; set; } = FlaxEngine.GUI.Orientation.Horizontal;
 
         /// <summary>
+        /// If checked, color pickers will always modify the color unless 'Cancel' if pressed, otherwise color won't change unless 'Ok' is pressed.
+        /// </summary>
+        [DefaultValue(true)]
+        [EditorDisplay("Interface"), EditorOrder(290)]
+        public bool AutoAcceptColorPickerChange { get; set; } = true;
+
+        /// <summary>
         /// Gets or sets the formatting option for numeric values in the editor.
         /// </summary>
         [DefaultValue(ValueFormattingType.None)]
@@ -367,6 +374,13 @@ namespace FlaxEditor.Options
         [DefaultValue(1.0f), Range(0.0f, 2.0f)]
         [EditorDisplay("Visject"), EditorOrder(550)]
         public float ConnectionCurvature { get; set; } = 1.0f;
+
+        /// <summary>
+        /// Gets or sets the visject connection curvature.
+        /// </summary>
+        [DefaultValue(true)]
+        [EditorDisplay("Visject"), EditorOrder(550), Tooltip("Shows/hides the description panel in the visual scripting context menu.")]
+        public bool VisualScriptingDescriptionPanel { get; set; } = true;
 
         private static FontAsset DefaultFont => FlaxEngine.Content.LoadAsyncInternal<FontAsset>(EditorAssets.PrimaryFont);
         private static FontAsset ConsoleFont => FlaxEngine.Content.LoadAsyncInternal<FontAsset>(EditorAssets.InconsolataRegularFont);

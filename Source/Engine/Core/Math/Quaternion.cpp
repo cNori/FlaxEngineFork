@@ -290,10 +290,15 @@ void Quaternion::Billboard(const Float3& objectPosition, const Float3& cameraPos
 
 Quaternion Quaternion::FromDirection(const Float3& direction)
 {
+    ASSERT(direction.IsNormalized());
     Quaternion orientation;
     if (Float3::Dot(direction, Float3::Up) >= 0.999f)
     {
         RotationAxis(Float3::Left, PI_OVER_2, orientation);
+    }
+    else if (Float3::Dot(direction, Float3::Down) >= 0.999f)
+    {
+        RotationAxis(Float3::Right, PI_OVER_2, orientation);
     }
     else
     {

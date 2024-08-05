@@ -12,6 +12,7 @@ namespace FlaxEngine
 #if FLAX_EDITOR
     [CustomEditor(typeof(FlaxEditor.CustomEditors.Editors.AssetRefEditor))]
 #endif
+    [Newtonsoft.Json.JsonConverter(typeof(Json.JsonAssetReferenceConverter))]
     public struct JsonAssetReference<T> : IComparable, IComparable<JsonAssetReference<T>>, IEquatable<JsonAssetReference<T>>
     {
         /// <summary>
@@ -31,6 +32,15 @@ namespace FlaxEngine
         public JsonAssetReference(JsonAsset asset)
         {
             Asset = asset;
+        }
+
+        /// <summary>
+        /// Gets the deserialized native object instance of the given type. Returns null if asset is not loaded or loaded object has different type.
+        /// </summary>
+        /// <returns>The asset instance object or null.</returns>
+        public U GetInstance<U>()
+        {
+            return Asset ? Asset.GetInstance<U>() : default(U);
         }
 
         /// <summary>

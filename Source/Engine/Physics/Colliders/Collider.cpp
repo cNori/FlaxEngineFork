@@ -70,6 +70,7 @@ void Collider::SetContactOffset(float value)
 
 bool Collider::RayCast(const Vector3& origin, const Vector3& direction, float& resultHitDistance, float maxDistance) const
 {
+    ASSERT(direction.IsNormalized());
     resultHitDistance = MAX_float;
     if (_shape == nullptr)
         return false;
@@ -78,6 +79,7 @@ bool Collider::RayCast(const Vector3& origin, const Vector3& direction, float& r
 
 bool Collider::RayCast(const Vector3& origin, const Vector3& direction, RayCastHit& hitInfo, float maxDistance) const
 {
+    ASSERT(direction.IsNormalized());
     if (_shape == nullptr)
         return false;
     return PhysicsBackend::RayCastShape(_shape, _transform.Translation, _transform.Orientation, origin, direction, hitInfo, maxDistance);

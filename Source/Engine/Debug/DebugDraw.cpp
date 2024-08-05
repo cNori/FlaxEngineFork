@@ -944,9 +944,16 @@ void DebugDraw::DrawActors(Actor** selectedActors, int32 selectedActorsCount, bo
     }
 }
 
+void DebugDraw::DrawActorsTree(Actor* actor)
+{
+    Function<bool(Actor*)> function = &DrawActorsTreeWalk;
+    actor->TreeExecute(function);
+}
+
 void DebugDraw::DrawAxisFromDirection(const Vector3& origin, const Vector3& direction, float size, float duration, bool depthTest)
 {
-    const auto rot = Quaternion::FromDirection(direction.GetNormalized());
+    ASSERT(direction.IsNormalized());
+    const auto rot = Quaternion::FromDirection(direction);
     const Vector3 up = (rot * Vector3::Up);
     const Vector3 forward = (rot * Vector3::Forward);
     const Vector3 right = (rot * Vector3::Right);
@@ -971,16 +978,17 @@ void DebugDraw::DrawRay(const Vector3& origin, const Vector3& direction, const C
 
 void DebugDraw::DrawRay(const Vector3& origin, const Vector3& direction, const Color& color, float length, float duration, bool depthTest)
 {
+    ASSERT(direction.IsNormalized());
     if (isnan(length) || isinf(length))
         return;
-    DrawLine(origin, origin + (direction.GetNormalized() * length), color, duration, depthTest);
+    DrawLine(origin, origin + (direction * length), color, duration, depthTest);
 }
 
 void DebugDraw::DrawRay(const Ray& ray, const Color& color, float length, float duration, bool depthTest)
 {
     if (isnan(length) || isinf(length))
         return;
-    DrawLine(ray.Position, ray.Position + (ray.Direction.GetNormalized() * length), color, duration, depthTest);
+    DrawLine(ray.Position, ray.Position + (ray.Direction * length), color, duration, depthTest);
 }
 
 void DebugDraw::DrawLine(const Vector3& start, const Vector3& end, const Color& color, float duration, bool depthTest)
