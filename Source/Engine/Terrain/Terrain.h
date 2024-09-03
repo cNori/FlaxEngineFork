@@ -72,7 +72,6 @@ private:
     Vector3 _boundsExtent;
     Float3 _cachedScale;
     Array<TerrainPatch*, InlinedAllocation<64>> _patches;
-    Array<TerrainChunk*> _drawChunks;
     Array<JsonAssetReference<PhysicalMaterial>, FixedAllocation<8>> _physicalMaterials;
 
 public:
@@ -130,7 +129,7 @@ public:
     }
 
     /// <summary>
-    /// Gets the terrain LODs distribution parameter. Adjusts terrain chunks transitions distances. Use lower value to increase terrain quality or higher value to increase performance. Default value is 0.75.
+    /// Gets the terrain LODs distribution parameter. Adjusts terrain chunks transitions distances. Use lower value to increase terrain quality or higher value to increase performance.
     /// </summary>
     API_PROPERTY(Attributes="EditorOrder(70), DefaultValue(0.6f), Limit(0, 5, 0.01f), EditorDisplay(\"Terrain\", \"LOD Distribution\")")
     FORCE_INLINE float GetLODDistribution() const
@@ -139,7 +138,7 @@ public:
     }
 
     /// <summary>
-    /// Sets the terrain LODs distribution parameter. Adjusts terrain chunks transitions distances. Use lower value to increase terrain quality or higher value to increase performance. Default value is 0.75.
+    /// Sets the terrain LODs distribution parameter. Adjusts terrain chunks transitions distances. Use lower value to increase terrain quality or higher value to increase performance.
     /// </summary>
     API_PROPERTY() void SetLODDistribution(float value);
 
@@ -424,9 +423,12 @@ private:
 #if TERRAIN_USE_PHYSICS_DEBUG
     void DrawPhysicsDebug(RenderView& view);
 #endif
+    bool DrawSetup(RenderContext& renderContext);
+    void DrawImpl(RenderContext& renderContext, HashSet<TerrainChunk*, class RendererAllocation>& drawnChunks);
 
 public:
     // [PhysicsColliderActor]
+    void Draw(RenderContextBatch& renderContextBatch) override;
     void Draw(RenderContext& renderContext) override;
 #if USE_EDITOR
     void OnDebugDrawSelected() override;

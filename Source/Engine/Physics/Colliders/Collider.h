@@ -188,16 +188,6 @@ protected:
     /// </summary>
     void RemoveStaticActor();
 
-#if USE_EDITOR
-    virtual void DrawPhysicsDebug(RenderView& view);
-
-    /// <summary>
-    /// [Editor only] shows collider when it is deselected
-    /// </summary>
-    API_FIELD(public,Attributes = "EditorOrder(200), EditorDisplay(\"Collider\")")
-        bool DisplayCollider = false;
-#endif
-
 private:
     void OnMaterialChanged();
     RigidBody* GetAttachmentRigidBody();
@@ -214,6 +204,16 @@ public:
     bool RayCast(const Vector3& origin, const Vector3& direction, RayCastHit& hitInfo, float maxDistance = MAX_float) const final;
     void ClosestPoint(const Vector3& point, Vector3& result) const final;
     bool ContainsPoint(const Vector3& point) const final;
+
+#if USE_EDITOR
+    virtual void DrawPhysicsDebug(RenderView& view);
+
+    /// <summary>
+    /// [Editor only] shows collider when it is deselected
+    /// </summary>
+    API_FIELD(public,Attributes = "EditorOrder(200), EditorDisplay(\"Collider\")")
+        bool DisplayCollider = false;
+#endif
 
 protected:
     // [PhysicsColliderActor]

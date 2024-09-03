@@ -142,6 +142,7 @@ namespace Flax.Build.Bindings
             // Numbers
             if (float.TryParse(value, out _) || (value[value.Length - 1] == 'f' && float.TryParse(value.Substring(0, value.Length - 1), out _)))
             {
+                value = value.Replace(".f", ".0f");
                 // If the value type is different than the value (eg. value is int but the field is float) then cast it for the [DefaultValue] attribute
                 if (valueType != null && attribute)
                     return $"({GenerateCSharpNativeToManaged(buildData, valueType, caller)}){value}";
@@ -166,7 +167,7 @@ namespace Flax.Build.Bindings
                     foreach (var vectorType in CSharpVectorTypes)
                     {
                         if (value.Length > vectorType.Length + 4 && value.StartsWith(vectorType) && value[vectorType.Length] == '(')
-                            return $"typeof({vectorType}), \"{value.Substring(vectorType.Length + 1, value.Length - vectorType.Length - 2).Replace("f", "")}\"";
+                            return $"typeof({vectorType}), \"{value.Substring(vectorType.Length + 1, value.Length - vectorType.Length - 2).Replace(".f", ".0").Replace("f", "")}\"";
                     }
 
                     return null;
@@ -2041,13 +2042,18 @@ namespace Flax.Build.Bindings
             GenerateCSharpAttributes(buildData, contents, indent, enumInfo, true);
             contents.Append(indent).Append(GenerateCSharpAccessLevel(enumInfo.Access));
             contents.Append("enum ").Append(enumInfo.Name);
+            string managedType = string.Empty;
             if (enumInfo.UnderlyingType != null)
-                contents.Append(" : ").Append(GenerateCSharpNativeToManaged(buildData, enumInfo.UnderlyingType, enumInfo));
+            {
+                managedType = GenerateCSharpNativeToManaged(buildData, enumInfo.UnderlyingType, enumInfo);
+                contents.Append(" : ").Append(managedType);
+            }
             contents.AppendLine();
             contents.Append(indent + "{");
             indent += "    ";
 
             // Entries
+            bool usedMax = false;
             foreach (var entryInfo in enumInfo.Entries)
             {
                 contents.AppendLine();
@@ -2055,7 +2061,29 @@ namespace Flax.Build.Bindings
                 GenerateCSharpAttributes(buildData, contents, indent, enumInfo, entryInfo.Attributes, entryInfo.Comment, true, false);
                 contents.Append(indent).Append(entryInfo.Name);
                 if (!string.IsNullOrEmpty(entryInfo.Value))
-                    contents.Append(" = ").Append(entryInfo.Value);
+                {
+                    if (usedMax)
+                        usedMax = false;
+
+                    string value;
+                    if (enumInfo.UnderlyingType != null)
+                    {
+                        value = GenerateCSharpDefaultValueNativeToManaged(buildData, entryInfo.Value, enumInfo, enumInfo.UnderlyingType, false, managedType);
+                        if (value.Contains($"{managedType}.MaxValue", StringComparison.Ordinal))
+                            usedMax = true;
+                    }
+                    else
+                    {
+                        value = entryInfo.Value;
+                    }
+                    contents.Append(" = ").Append(value);
+                }
+                // Handle case of next value after Max value being zero if a value is not defined.
+                else if (string.IsNullOrEmpty(entryInfo.Value) && usedMax)
+                {
+                    contents.Append(" = ").Append('0');
+                    usedMax = false;
+                }
                 contents.Append(',');
                 contents.AppendLine();
             }

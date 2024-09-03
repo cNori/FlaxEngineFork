@@ -113,6 +113,11 @@ TerrainPatch::~TerrainPatch()
 #endif
 }
 
+RawDataAsset* TerrainPatch::GetHeightfield() const
+{
+    return _heightfield.Get();
+}
+
 void TerrainPatch::RemoveLightmap()
 {
     for (auto& chunk : Chunks)
@@ -1215,7 +1220,8 @@ Color32* TerrainPatch::GetSplatMapData(int32 index)
 void TerrainPatch::ClearSplatMapCache()
 {
     PROFILE_CPU_NAMED("Terrain.ClearSplatMapCache");
-    _cachedSplatMap->Clear();
+    if (_cachedSplatMap)
+        _cachedSplatMap->Clear();
 }
 
 void TerrainPatch::ClearCache()
@@ -1963,7 +1969,7 @@ bool TerrainPatch::UpdateCollision()
 
 bool TerrainPatch::RayCast(const Vector3& origin, const Vector3& direction, float& resultHitDistance, float maxDistance) const
 {
-    ASSERT(direction.IsNormalized());
+    CHECK_RETURN_DEBUG(direction.IsNormalized(), false);
     if (_physicsShape == nullptr)
         return false;
     Vector3 shapePos;
@@ -1974,7 +1980,7 @@ bool TerrainPatch::RayCast(const Vector3& origin, const Vector3& direction, floa
 
 bool TerrainPatch::RayCast(const Vector3& origin, const Vector3& direction, float& resultHitDistance, Vector3& resultHitNormal, float maxDistance) const
 {
-    ASSERT(direction.IsNormalized());
+    CHECK_RETURN_DEBUG(direction.IsNormalized(), false);
     if (_physicsShape == nullptr)
         return false;
     Vector3 shapePos;
@@ -1992,7 +1998,7 @@ bool TerrainPatch::RayCast(const Vector3& origin, const Vector3& direction, floa
 
 bool TerrainPatch::RayCast(const Vector3& origin, const Vector3& direction, float& resultHitDistance, TerrainChunk*& resultChunk, float maxDistance) const
 {
-    ASSERT(direction.IsNormalized());
+    CHECK_RETURN_DEBUG(direction.IsNormalized(), false);
     if (_physicsShape == nullptr)
         return false;
     Vector3 shapePos;
@@ -2030,7 +2036,7 @@ bool TerrainPatch::RayCast(const Vector3& origin, const Vector3& direction, floa
 
 bool TerrainPatch::RayCast(const Vector3& origin, const Vector3& direction, RayCastHit& hitInfo, float maxDistance) const
 {
-    ASSERT(direction.IsNormalized());
+    CHECK_RETURN_DEBUG(direction.IsNormalized(), false);
     if (_physicsShape == nullptr)
         return false;
     Vector3 shapePos;

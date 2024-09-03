@@ -338,6 +338,7 @@ void AudioSource::PlayInternal()
     AudioBackend::Source::Play(this);
 
     _isActuallyPlayingSth = true;
+    _startingToPlay = true;
 }
 
 #if USE_EDITOR
@@ -417,6 +418,30 @@ void AudioSource::Update()
     if (_velocity != prevVelocity)
     {
         AudioBackend::Source::VelocityChanged(this);
+    }
+
+    // Reset starting to play value once time is greater than zero
+    if (_startingToPlay && GetTime() > 0.0f)
+    {
+        _startingToPlay = false;
+    }
+
+    if (!UseStreaming() && Math::NearEqual(GetTime(), 0.0f) && _isActuallyPlayingSth && !_startingToPlay)
+    {
+        int32 queuedBuffers;
+        AudioBackend::Source::GetQueuedBuffersCount(this, queuedBuffers);
+        if (queuedBuffers)
+        {
+            if (GetIsLooping())
+            {
+                Stop();
+                Play();
+            }
+            else
+            {
+                Stop();
+            }
+        }
     }
 
     // Skip other update logic if it's not valid streamable source

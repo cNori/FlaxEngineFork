@@ -289,9 +289,9 @@ void DrawEmitterCPU(RenderContext& renderContext, ParticleBuffer* buffer, DrawCa
     // Check if need to setup ribbon modules
     int32 ribbonModuleIndex = 0;
     int32 ribbonModulesDrawIndicesPos = 0;
-    int32 ribbonModulesDrawIndicesStart[PARTICLE_EMITTER_MAX_RIBBONS];
-    int32 ribbonModulesDrawIndicesCount[PARTICLE_EMITTER_MAX_RIBBONS];
-    int32 ribbonModulesSegmentCount[PARTICLE_EMITTER_MAX_RIBBONS];
+    int32 ribbonModulesDrawIndicesStart[PARTICLE_EMITTER_MAX_RIBBONS] = {};
+    int32 ribbonModulesDrawIndicesCount[PARTICLE_EMITTER_MAX_RIBBONS] = {};
+    int32 ribbonModulesSegmentCount[PARTICLE_EMITTER_MAX_RIBBONS] = {};
     if (emitter->Graph.RibbonRenderingModules.HasItems())
     {
         // Prepare ribbon data
@@ -931,6 +931,8 @@ void Particles::DrawParticles(RenderContext& renderContext, ParticleEffect* effe
         if (!buffer || (buffer->Mode == ParticlesSimulationMode::CPU && buffer->CPU.Count == 0))
             continue;
         auto emitter = buffer->Emitter;
+        if (!emitter || !emitter->IsLoaded())
+            continue;
 
         buffer->Emitter->GraphExecutorCPU.Draw(buffer->Emitter, effect, emitterData, renderContext, worlds[(int32)emitter->SimulationSpace]);
     }
@@ -949,6 +951,8 @@ void Particles::DrawParticles(RenderContext& renderContext, ParticleEffect* effe
         if (!buffer)
             continue;
         auto emitter = buffer->Emitter;
+        if (!emitter || !emitter->IsLoaded())
+            continue;
 
         drawCall.World = worlds[(int32)emitter->SimulationSpace];
         drawCall.WorldDeterminantSign = worldDeterminantSigns[(int32)emitter->SimulationSpace];
