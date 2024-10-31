@@ -156,6 +156,12 @@ Action Scripting::ScriptsLoaded;
 Action Scripting::ScriptsUnload;
 Action Scripting::ScriptsReloading;
 Action Scripting::ScriptsReloaded;
+Action Scripting::Update;
+Action Scripting::LateUpdate;
+Action Scripting::FixedUpdate;
+Action Scripting::LateFixedUpdate;
+Action Scripting::Draw;
+Action Scripting::Exit;
 ThreadLocal<Scripting::IdsMappingTable*, PLATFORM_THREADS_LIMIT> Scripting::ObjectsLookupIdMapping;
 ScriptingService ScriptingServiceInstance;
 
@@ -205,9 +211,9 @@ bool ScriptingService::Init()
 }
 
 #if COMPILE_WITHOUT_CSHARP
-#define INVOKE_EVENT(name)
+#define INVOKE_EVENT(name) Scripting::name();
 #else
-#define INVOKE_EVENT(name) \
+#define INVOKE_EVENT(name) Scripting::name(); \
     if (!_isEngineAssemblyLoaded) return; \
 	if (_method_##name == nullptr) \
 	{ \
@@ -881,7 +887,8 @@ ScriptingObject* Scripting::FindObject(Guid id, const MClass* type)
         // Check type
         if (!type || result->Is(type))
             return result;
-        LOG(Warning, "Found scripting object with ID={0} of type {1} that doesn't match type {2}. {3}", id, String(result->GetType().Fullname), String(type->GetFullName()), LogContext::GetInfo());
+        LOG(Warning, "Found scripting object with ID={0} of type {1} that doesn't match type {2}", id, String(result->GetType().Fullname), String(type->GetFullName()));
+        LogContext::Print(LogType::Warning);
         return nullptr;
     }
 
@@ -900,7 +907,8 @@ ScriptingObject* Scripting::FindObject(Guid id, const MClass* type)
             return asset;
     }
 
-    LOG(Warning, "Unable to find scripting object with ID={0}. Required type {1}. {2}", id, String(type->GetFullName()), LogContext::GetInfo());
+    LOG(Warning, "Unable to find scripting object with ID={0}. Required type {1}", id, String(type->GetFullName()));
+    LogContext::Print(LogType::Warning);
     return nullptr;
 }
 

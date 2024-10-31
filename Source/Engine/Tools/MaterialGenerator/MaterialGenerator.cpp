@@ -467,7 +467,7 @@ bool MaterialGenerator::Generate(WriteStream& source, MaterialInfo& materialInfo
         switch (baseLayer->Domain)
         {
         case MaterialDomain::Surface:
-            srv = 2; // Skinning Bones + Prev Bones
+            srv = 3; // Objects + Skinning Bones + Prev Bones
             break;
         case MaterialDomain::Decal:
             srv = 1; // Depth buffer
@@ -830,6 +830,34 @@ void MaterialGenerator::WriteCustomGlobalCode(const Array<const MaterialGraph::N
             _writer.Write(TEXT("\n"));
         }
     }
+}
+
+ShaderGenerator::Value MaterialGenerator::VsToPs(Node* node, Box* input)
+{
+    // If used in VS then pass the value from the input box
+    if (_treeType == MaterialTreeType::VertexShader)
+    {
+        return tryGetValue(input, Value::Zero).AsFloat4();
+    }
+
+    // Check if can use more interpolants
+    if (_vsToPsInterpolants.Count() == 16)
+    {
+        OnError(node, input, TEXT("Too many VS to PS interpolants used."));
+        return Value::Zero;
+    }
+
+    // Check if can use interpolants
+    const auto layer = GetRootLayer();
+    if (!layer || layer->Domain == MaterialDomain::Decal || layer->Domain == MaterialDomain::PostProcess)
+    {
+        OnError(node, input, TEXT("VS to PS interpolants are not supported in Decal or Post Process materials."));
+        return Value::Zero;
+    }
+
+    // Indicate the interpolator slot usage
+    _vsToPsInterpolants.Add(input);
+    return Value(VariantType::Float4, String::Format(TEXT("input.CustomVSToPS[{0}]"), _vsToPsInterpolants.Count() - 1));
 }
 
 #endif

@@ -102,8 +102,22 @@ namespace Flax.Build.Bindings
 
         private static string GenerateCSharpDefaultValueNativeToManaged(BuildData buildData, string value, ApiTypeInfo caller, TypeInfo valueType = null, bool attribute = false, string managedType = null)
         {
+            ApiTypeInfo apiType = null;
             if (string.IsNullOrEmpty(value))
+            {
+                if (attribute && valueType != null && !valueType.IsArray)
+                {
+                    //if (valueType.Type == "")
+                    //ScriptingObjectReference
+                    apiType = FindApiTypeInfo(buildData, valueType, caller);
+
+                    // Object reference
+                    if (apiType != null && apiType.IsScriptingObject)
+                        return "null";
+                }
+
                 return null;
+            }
 
             // Special case for Engine TEXT macro
             if (value.StartsWith("TEXT(\"") && value.EndsWith("\")"))
@@ -139,6 +153,28 @@ namespace Flax.Build.Bindings
             case "false": return value;
             }
 
+            // Handle float{_} style type of default values
+            if (valueType != null && value.StartsWith($"{valueType.Type}") && value.EndsWith("}"))
+            {
+                value = value.Replace($"{valueType.Type}", "").Replace("{", "").Replace("}", "").Trim();
+                if (string.IsNullOrEmpty(value))
+                {
+                    value = $"default({valueType.Type})";
+                    return value;
+                }
+            }
+
+            // Handle C++ bracket default values that are not arrays
+            if (value.StartsWith("{") && value.EndsWith("}") && valueType != null && !valueType.IsArray && valueType.Type != "Array")
+            {
+                value = value.Replace("{", "").Replace("}", "").Trim();
+                if (string.IsNullOrEmpty(value))
+                {
+                    value = $"default({valueType.Type})";
+                    return value;
+                }
+            }
+
             // Numbers
             if (float.TryParse(value, out _) || (value[value.Length - 1] == 'f' && float.TryParse(value.Substring(0, value.Length - 1), out _)))
             {
@@ -151,7 +187,6 @@ namespace Flax.Build.Bindings
 
             value = value.Replace("::", ".");
             var dot = value.LastIndexOf('.');
-            ApiTypeInfo apiType = null;
             if (dot != -1)
             {
                 var type = new TypeInfo(value.Substring(0, dot));
@@ -530,7 +565,7 @@ namespace Flax.Build.Bindings
 
                     // interface
                     if (apiType.IsInterface)
-                        return string.Format("FlaxEngine.Object.GetUnmanagedInterface({{0}}, typeof({0}))", apiType.FullNameManaged);
+                        return string.Format("FlaxEngine.Object.GetUnmanagedInterface({{0}}, typeof({0}))", apiType.Name);
                 }
 
                 // Object reference property
@@ -590,7 +625,7 @@ namespace Flax.Build.Bindings
                     fullReturnValueType = $"{apiType.Namespace}.Interop.{returnValueType}";
 
                 // Interfaces are not supported by NativeMarshallingAttribute, marshal the parameter
-                returnMarshalType = $"MarshalUsing(typeof({fullReturnValueType}Marshaller))";
+                returnMarshalType = $"MarshalUsing(typeof({returnValueType}Marshaller))";
             }
             else if (functionInfo.ReturnType.Type == "MonoArray" || functionInfo.ReturnType.Type == "MArray")
                 returnMarshalType = "MarshalUsing(typeof(FlaxEngine.Interop.SystemArrayMarshaller))";
@@ -830,7 +865,7 @@ namespace Flax.Build.Bindings
             }
         }
 
-        private static void GenerateCSharpAttributes(BuildData buildData, StringBuilder contents, string indent, ApiTypeInfo apiTypeInfo, string attributes = null, string[] comment = null, bool canUseTooltip = false, bool useUnmanaged = false, string defaultValue = null, bool isDeprecated = false, TypeInfo defaultValueType = null)
+        private static void GenerateCSharpAttributes(BuildData buildData, StringBuilder contents, string indent, ApiTypeInfo apiTypeInfo, string attributes = null, string[] comment = null, bool canUseTooltip = false, bool useUnmanaged = false, string defaultValue = null, string deprecatedMessage = null, TypeInfo defaultValueType = null)
         {
 #if AUTO_DOC_TOOLTIPS
             var writeTooltip = true;
@@ -854,10 +889,15 @@ namespace Flax.Build.Bindings
                 // Skip boilerplate code when using debugger
                 //contents.Append(indent).AppendLine("[System.Diagnostics.DebuggerStepThrough]");
             }
-            if (isDeprecated || apiTypeInfo.IsDeprecated)
+            if (deprecatedMessage != null || apiTypeInfo.IsDeprecated)
             {
                 // Deprecated type
-                contents.Append(indent).AppendLine("[Obsolete]");
+                if (!string.IsNullOrEmpty(apiTypeInfo.DeprecatedMessage))
+                    contents.Append(indent).AppendLine($"[Obsolete(\"{apiTypeInfo.DeprecatedMessage}\")]");
+                else if (!string.IsNullOrEmpty(deprecatedMessage))
+                    contents.Append(indent).AppendLine($"[Obsolete(\"{deprecatedMessage}\")]");
+                else
+                    contents.Append(indent).AppendLine("[Obsolete]");
             }
 
 #if AUTO_DOC_TOOLTIPS
@@ -898,16 +938,40 @@ namespace Flax.Build.Bindings
                 if (defaultValue != null)
                     contents.Append(indent).Append("[DefaultValue(").Append(defaultValue).Append(")]").AppendLine();
             }
+            
+            // Check if array has fixed allocation and add in MaxCount Collection attribute if a Collection attribute does not already exist.
+            if (defaultValueType != null && (string.IsNullOrEmpty(attributes) || !attributes.Contains("Collection", StringComparison.Ordinal)))
+            {
+                // Array or Span or DataContainer
+#if USE_NETCORE
+                if ((defaultValueType.Type == "Array" || defaultValueType.Type == "Span" || defaultValueType.Type == "DataContainer" || defaultValueType.Type == "MonoArray" || defaultValueType.Type == "MArray") && defaultValueType.GenericArgs != null)
+#else
+                if ((defaultValueType.Type == "Array" || defaultValueType.Type == "Span" || defaultValueType.Type == "DataContainer") && defaultValueType.GenericArgs != null)
+#endif
+                {
+                    if (defaultValueType.GenericArgs.Count > 1)
+                    {
+                        var allocationArg = defaultValueType.GenericArgs[1];
+                        if (allocationArg.Type.Contains("FixedAllocation", StringComparison.Ordinal) && allocationArg.GenericArgs.Count > 0)
+                        {
+                            if (int.TryParse(allocationArg.GenericArgs[0].ToString(), out int allocation))
+                            {
+                                contents.Append(indent).Append($"[Collection(MaxCount={allocation.ToString()})]").AppendLine();
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         private static void GenerateCSharpAttributes(BuildData buildData, StringBuilder contents, string indent, ApiTypeInfo apiTypeInfo, bool useUnmanaged, string defaultValue = null, TypeInfo defaultValueType = null)
         {
-            GenerateCSharpAttributes(buildData, contents, indent, apiTypeInfo, apiTypeInfo.Attributes, apiTypeInfo.Comment, true, useUnmanaged, defaultValue, false, defaultValueType);
+            GenerateCSharpAttributes(buildData, contents, indent, apiTypeInfo, apiTypeInfo.Attributes, apiTypeInfo.Comment, true, useUnmanaged, defaultValue, null, defaultValueType);
         }
 
         private static void GenerateCSharpAttributes(BuildData buildData, StringBuilder contents, string indent, ApiTypeInfo apiTypeInfo, MemberInfo memberInfo, bool useUnmanaged, string defaultValue = null, TypeInfo defaultValueType = null)
         {
-            GenerateCSharpAttributes(buildData, contents, indent, apiTypeInfo, memberInfo.Attributes, memberInfo.Comment, true, useUnmanaged, defaultValue, memberInfo.IsDeprecated, defaultValueType);
+            GenerateCSharpAttributes(buildData, contents, indent, apiTypeInfo, memberInfo.Attributes, memberInfo.Comment, true, useUnmanaged, defaultValue, memberInfo.DeprecatedMessage, defaultValueType);
         }
 
         private static bool GenerateCSharpStructureUseDefaultInitialize(BuildData buildData, StructureInfo structureInfo)
@@ -1092,6 +1156,8 @@ namespace Flax.Build.Bindings
                 contents.Append(indent).Append('}').AppendLine();
 
                 contents.AppendLine();
+                if (buildData.Configuration != TargetConfiguration.Release)
+                    contents.Append(indent).Append("[System.Diagnostics.DebuggerBrowsable(global::System.Diagnostics.DebuggerBrowsableState.Never)]").AppendLine();
                 contents.Append(indent).Append("private ");
                 if (eventInfo.IsStatic)
                     contents.Append("static ");
@@ -1427,14 +1493,15 @@ namespace Flax.Build.Bindings
                 {{GenerateCSharpAccessLevel(classInfo.Access)}}static class {{marshallerName}}
                 {
                 #pragma warning disable 1591
+                #pragma warning disable 618
                 #if FLAX_EDITOR
                     [HideInEditor]
                 #endif
                     public static class NativeToManaged
                     {
                         public static {{classInfo.Name}} ConvertToManaged(IntPtr unmanaged) => Unsafe.As<{{classInfo.Name}}>(ManagedHandleMarshaller.NativeToManaged.ConvertToManaged(unmanaged));
-                        public static IntPtr ConvertToUnmanaged({{classInfo.Name}} managed) => ManagedHandleMarshaller.ManagedToNative.ConvertToUnmanaged(managed);
-                        public static void Free(IntPtr unmanaged) => ManagedHandleMarshaller.NativeToManaged.Free(unmanaged);
+                        public static IntPtr ConvertToUnmanaged({{classInfo.Name}} managed) => managed != null ? ManagedHandle.ToIntPtr(managed, GCHandleType.Weak) : IntPtr.Zero;
+                        public static void Free(IntPtr unmanaged) {}
                     }
                 #if FLAX_EDITOR
                     [HideInEditor]
@@ -1442,8 +1509,8 @@ namespace Flax.Build.Bindings
                     public static class ManagedToNative
                     {
                         public static {{classInfo.Name}} ConvertToManaged(IntPtr unmanaged) => Unsafe.As<{{classInfo.Name}}>(ManagedHandleMarshaller.NativeToManaged.ConvertToManaged(unmanaged));
-                        public static IntPtr ConvertToUnmanaged({{classInfo.Name}} managed) => ManagedHandleMarshaller.ManagedToNative.ConvertToUnmanaged(managed);
-                        public static void Free(IntPtr unmanaged) => ManagedHandleMarshaller.ManagedToNative.Free(unmanaged);
+                        public static IntPtr ConvertToUnmanaged({{classInfo.Name}} managed) => managed != null ? ManagedHandle.ToIntPtr(managed, GCHandleType.Weak) : IntPtr.Zero;
+                        public static void Free(IntPtr unmanaged) {}
                     }
                 #if FLAX_EDITOR
                     [HideInEditor]
@@ -1463,6 +1530,7 @@ namespace Flax.Build.Bindings
 
                     internal static {{classInfo.Name}} ToManaged(IntPtr managed) => Unsafe.As<{{classInfo.Name}}>(ManagedHandleMarshaller.ToManaged(managed));
                     internal static IntPtr ToNative({{classInfo.Name}} managed) => ManagedHandleMarshaller.ToNative(managed);
+                #pragma warning restore 618
                 #pragma warning restore 1591
                 }
                 """).Split(new char[] { '\n' })));
@@ -1760,6 +1828,7 @@ namespace Flax.Build.Bindings
                 {{GenerateCSharpAccessLevel(structureInfo.Access)}}static unsafe class {{marshallerName}}
                 {
                 #pragma warning disable 1591
+                #pragma warning disable 618
                     {{structContents.Replace("\n", "\n" + "    ").ToString().TrimEnd()}}
 
                     {{InsertHideInEditorSection()}}
@@ -1786,7 +1855,6 @@ namespace Flax.Build.Bindings
                         {{structureInfo.Name}}Internal unmanaged;
                         public void FromManaged({{structureInfo.Name}} managed) => this.managed = managed;
                         public {{structureInfo.Name}}Internal ToUnmanaged() { unmanaged = {{marshallerFullName}}.ToNative(managed); return unmanaged; }
-                        //public void FromUnmanaged({{structureInfo.Name}}Internal unmanaged) { {{marshallerFullName}}.Free(this.unmanaged.Value); this.unmanaged = unmanaged; }
                         public void FromUnmanaged({{structureInfo.Name}}Internal unmanaged) => this.unmanaged = unmanaged;
                         public {{structureInfo.Name}} ToManaged() { managed = {{marshallerFullName}}.ToManaged(unmanaged); return managed; }
                         public void Free() => NativeToManaged.Free(unmanaged);
@@ -1806,6 +1874,7 @@ namespace Flax.Build.Bindings
                     {
                         {{toNativeContent.Replace("\n", "\n" + "        ").ToString().TrimEnd()}}
                     }
+                #pragma warning restore 618
                 #pragma warning restore 1591
                 }
                 """).Split(new char[] { '\n' })));
@@ -2189,12 +2258,14 @@ namespace Flax.Build.Bindings
                 contents.Append(indent).AppendLine("/// </summary>");
                 if (buildData.Target != null & buildData.Target.IsEditor)
                     contents.Append(indent).AppendLine("[HideInEditor]");
-                contents.Append(indent).AppendLine($"[CustomMarshaller(typeof({interfaceInfo.Name}), MarshalMode.Default, typeof({marshallerFullName}))]");
+                contents.Append(indent).AppendLine($"[CustomMarshaller(typeof({interfaceInfo.Name}), MarshalMode.Default, typeof({marshallerName}))]");
                 contents.Append(indent).AppendLine($"public static class {marshallerName}");
                 contents.Append(indent).AppendLine("{");
                 contents.AppendLine("#pragma warning disable 1591");
+                contents.AppendLine("#pragma warning disable 618");
                 contents.Append(indent).Append("    ").AppendLine($"internal static {interfaceInfo.Name} ConvertToManaged(IntPtr unmanaged) => ({interfaceInfo.Name})ManagedHandleMarshaller.ConvertToManaged(unmanaged);");
                 contents.Append(indent).Append("    ").AppendLine($"internal static IntPtr ConvertToUnmanaged({interfaceInfo.Name} managed) => ManagedHandleMarshaller.ConvertToUnmanaged(managed);");
+                contents.AppendLine("#pragma warning restore 618");
                 contents.AppendLine("#pragma warning restore 1591");
                 contents.Append(indent).AppendLine("}");
             }

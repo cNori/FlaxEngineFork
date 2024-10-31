@@ -4,6 +4,7 @@ using System.ComponentModel;
 using FlaxEditor.GUI.Docking;
 using FlaxEditor.Utilities;
 using FlaxEngine;
+using FlaxEngine.GUI;
 
 namespace FlaxEditor.Options
 {
@@ -211,11 +212,30 @@ namespace FlaxEditor.Options
         public bool SeparateValueAndUnit { get; set; }
 
         /// <summary>
-        /// Gets or sets the option to put a space between numbers and units for unit formatting.
+        /// Gets or sets tree line visibility.
         /// </summary>
         [DefaultValue(true)]
-        [EditorDisplay("Interface"), EditorOrder(320)]
+        [EditorDisplay("Interface"), EditorOrder(320), Tooltip("Toggles tree line visibility in places like the Scene or Content Panel.")]
         public bool ShowTreeLines { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets tooltip text alignment.
+        /// </summary>
+        [DefaultValue(TextAlignment.Center)]
+        [EditorDisplay("Interface"), EditorOrder(321)]
+        public TextAlignment TooltipTextAlignment
+        {
+            get => _tooltipTextAlignment;
+            set
+            {
+                _tooltipTextAlignment = value;
+                var tooltip = Style.Current?.SharedTooltip;
+                if (tooltip != null)
+                    tooltip.HorizontalTextAlignment = value;
+            }
+        }
+
+        private TextAlignment _tooltipTextAlignment = TextAlignment.Center;
 
         /// <summary>
         /// Gets or sets the timestamps prefix mode for output log messages.
@@ -369,18 +389,32 @@ namespace FlaxEditor.Options
         public int NumberOfGameClientsToLaunch = 1;
 
         /// <summary>
-        /// Gets or sets the visject connection curvature.
+        /// Gets or sets the curvature of the line connecting to connected visject nodes.
         /// </summary>
         [DefaultValue(1.0f), Range(0.0f, 2.0f)]
         [EditorDisplay("Visject"), EditorOrder(550)]
         public float ConnectionCurvature { get; set; } = 1.0f;
 
         /// <summary>
-        /// Gets or sets the visject connection curvature.
+        /// Gets or sets a value that indicates wether the context menu description panel is shown or not.
         /// </summary>
         [DefaultValue(true)]
-        [EditorDisplay("Visject"), EditorOrder(550), Tooltip("Shows/hides the description panel in the visual scripting context menu.")]
-        public bool VisualScriptingDescriptionPanel { get; set; } = true;
+        [EditorDisplay("Visject"), EditorOrder(550), Tooltip("Shows/hides the description panel in visual scripting context menu.")]
+        public bool NodeDescriptionPanel { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets the surface grid snapping option.
+        /// </summary>
+        [DefaultValue(false)]
+        [EditorDisplay("Visject", "Grid Snapping"), EditorOrder(551), Tooltip("Toggles grid snapping when moving nodes.")]
+        public bool SurfaceGridSnapping { get; set; } = false;
+
+        /// <summary>
+        /// Gets or sets the surface grid snapping option.
+        /// </summary>
+        [DefaultValue(20.0f)]
+        [EditorDisplay("Visject", "Grid Snapping Size"), EditorOrder(551), Tooltip("Defines the size of the grid for nodes snapping."), VisibleIf(nameof(SurfaceGridSnapping))]
+        public float SurfaceGridSnappingSize { get; set; } = 20.0f;
 
         private static FontAsset DefaultFont => FlaxEngine.Content.LoadAsyncInternal<FontAsset>(EditorAssets.PrimaryFont);
         private static FontAsset ConsoleFont => FlaxEngine.Content.LoadAsyncInternal<FontAsset>(EditorAssets.InconsolataRegularFont);

@@ -52,7 +52,7 @@ void Terrain::UpdateBounds()
     }
     BoundingSphere::FromBox(_box, _sphere);
     if (_sceneRenderingKey != -1)
-        GetSceneRendering()->UpdateActor(this, _sceneRenderingKey);
+        GetSceneRendering()->UpdateActor(this, _sceneRenderingKey, ISceneRenderingListener::Bounds);
 }
 
 void Terrain::CacheNeighbors()
@@ -859,6 +859,15 @@ void Terrain::OnDisable()
 #if TERRAIN_USE_PHYSICS_DEBUG
     GetSceneRendering()->RemovePhysicsDebug<Terrain, &Terrain::DrawPhysicsDebug>(this);
 #endif
+    void* scene = GetPhysicsScene()->GetPhysicsScene();
+    for (int32 i = 0; i < _patches.Count(); i++)
+    {
+        auto patch = _patches[i];
+        if (patch->_physicsActor)
+        {
+            PhysicsBackend::RemoveSceneActor(scene, patch->_physicsActor);
+        }
+    }
 
     // Base
     Actor::OnDisable();
@@ -896,7 +905,7 @@ void Terrain::OnLayerChanged()
 
     UpdateLayerBits();
     if (_sceneRenderingKey != -1)
-        GetSceneRendering()->UpdateActor(this, _sceneRenderingKey);
+        GetSceneRendering()->UpdateActor(this, _sceneRenderingKey, ISceneRenderingListener::Layer);
 }
 
 void Terrain::OnActiveInTreeChanged()

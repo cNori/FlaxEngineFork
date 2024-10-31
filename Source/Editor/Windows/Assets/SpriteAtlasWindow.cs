@@ -153,11 +153,37 @@ namespace FlaxEditor.Windows.Assets
                 {
                     var menu = new ContextMenu();
 
+                    var copySprite = menu.AddButton("Copy sprite");
+                    copySprite.Tag = groupPanel.Tag;
+                    copySprite.ButtonClicked += OnCopySpriteClicked;
+
+                    var pasteSprite = menu.AddButton("Paste sprite");
+                    pasteSprite.Tag = groupPanel.Tag;
+                    pasteSprite.ButtonClicked += OnPasteSpriteClicked;
+
                     var deleteSprite = menu.AddButton("Delete sprite");
                     deleteSprite.Tag = groupPanel.Tag;
                     deleteSprite.ButtonClicked += OnDeleteSpriteClicked;
 
                     menu.Show(groupPanel, location);
+                }
+
+                private void OnCopySpriteClicked(ContextMenuButton button)
+                {
+                    var window = ((PropertiesProxy)ParentEditor.Values[0])._window;
+                    var index = (int)button.Tag;
+                    var sprite = window.Asset.GetSprite(index);
+                    Clipboard.Text = FlaxEngine.Json.JsonSerializer.Serialize(sprite, typeof(Sprite));
+                }
+
+                private void OnPasteSpriteClicked(ContextMenuButton button)
+                {
+                    var window = ((PropertiesProxy)ParentEditor.Values[0])._window;
+                    var index = (int)button.Tag;
+                    var sprite = window.Asset.GetSprite(index);
+                    var pasted = FlaxEngine.Json.JsonSerializer.Deserialize<Sprite>(Clipboard.Text);
+                    sprite.Area = pasted.Area;
+                    window.Asset.SetSprite(index, ref sprite);
                 }
 
                 private void OnDeleteSpriteClicked(ContextMenuButton button)
@@ -247,6 +273,8 @@ namespace FlaxEditor.Windows.Assets
         public SpriteAtlasWindow(Editor editor, AssetItem item)
         : base(editor, item)
         {
+            var inputOptions = Editor.Options.Options.Input;
+
             // Split Panel
             _split = new SplitPanel(Orientation.Horizontal, ScrollBars.None, ScrollBars.Vertical)
             {
@@ -270,7 +298,7 @@ namespace FlaxEditor.Windows.Assets
             _propertiesEditor.Modified += MarkAsEdited;
 
             // Toolstrip
-            _saveButton = (ToolStripButton)_toolstrip.AddButton(editor.Icons.Save64, Save).LinkTooltip("Save");
+            _saveButton = _toolstrip.AddButton(editor.Icons.Save64, Save).LinkTooltip("Save", ref inputOptions.Save);
             _toolstrip.AddButton(editor.Icons.Import64, () => Editor.ContentImporting.Reimport((BinaryAssetItem)Item)).LinkTooltip("Reimport");
             _toolstrip.AddSeparator();
             _toolstrip.AddButton(editor.Icons.AddFile64, () =>

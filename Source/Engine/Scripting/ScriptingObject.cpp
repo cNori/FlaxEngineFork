@@ -261,7 +261,11 @@ ScriptingObject* ScriptingObject::ToNative(MObject* obj)
 bool ScriptingObject::Is(const ScriptingTypeHandle& type) const
 {
     CHECK_RETURN(type, false);
+#if SCRIPTING_OBJECT_CAST_WITH_CSHARP
     return _type == type || CanCast(GetClass(), type.GetType().ManagedClass);
+#else
+    return CanCast(GetTypeHandle(), type);
+#endif
 }
 
 void ScriptingObject::ChangeID(const Guid& newId)
@@ -273,10 +277,10 @@ void ScriptingObject::ChangeID(const Guid& newId)
 
     // Update managed instance
     const auto managedInstance = GetManagedInstance();
-    const auto monoClass = GetClass();
-    if (managedInstance && monoClass)
+    const auto klass = GetClass();
+    if (managedInstance && klass)
     {
-        const MField* monoIdField = monoClass->GetField(ScriptingObject_id);
+        const MField* monoIdField = klass->GetField(ScriptingObject_id);
         if (monoIdField)
             monoIdField->SetValue(managedInstance, &_id);
     }
@@ -340,10 +344,10 @@ bool ScriptingObject::CreateManaged()
 #endif
     {
         // Other thread already created the object before
-        if (const auto monoClass = GetClass())
+        if (const auto klass = GetClass())
         {
             // Reset managed to unmanaged pointer
-            MCore::ScriptingObject::SetInternalValues(monoClass, managedInstance, nullptr, nullptr);
+            MCore::ScriptingObject::SetInternalValues(klass, managedInstance, nullptr, nullptr);
         }
         MCore::GCHandle::Free(handle);
         return true;
@@ -362,17 +366,17 @@ bool ScriptingObject::CreateManaged()
 MObject* ScriptingObject::CreateManagedInternal()
 {
     // Get class
-    MClass* monoClass = GetClass();
-    if (monoClass == nullptr)
+    MClass* klass = GetClass();
+    if (klass == nullptr)
     {
         LOG(Warning, "Missing managed class for object with id {0}", GetID());
         return nullptr;
     }
 
-    MObject* managedInstance = MCore::ScriptingObject::CreateScriptingObject(monoClass, this, &_id);
+    MObject* managedInstance = MCore::ScriptingObject::CreateScriptingObject(klass, this, &_id);
     if (managedInstance == nullptr)
     {
-        LOG(Warning, "Failed to create new instance of the object of type {0}", String(monoClass->GetFullName()));
+        LOG(Warning, "Failed to create new instance of the object of type {0}", String(klass->GetFullName()));
     }
 
     return managedInstance;
@@ -389,9 +393,9 @@ void ScriptingObject::DestroyManaged()
     // Reset managed to unmanaged pointer
     if (managedInstance)
     {
-        if (const auto monoClass = GetClass())
+        if (const auto klass = GetClass())
         {
-            MCore::ScriptingObject::SetInternalValues(monoClass, managedInstance, nullptr, nullptr);
+            MCore::ScriptingObject::SetInternalValues(klass, managedInstance, nullptr, nullptr);
         }
     }
 
@@ -422,10 +426,16 @@ void ScriptingObject::UnregisterObject()
 
 bool ScriptingObject::CanCast(const ScriptingTypeHandle& from, const ScriptingTypeHandle& to)
 {
+    if (from == to)
+        return true;
     if (!from && !to)
         return true;
     CHECK_RETURN(from && to, false);
+#if SCRIPTING_OBJECT_CAST_WITH_CSHARP
     return CanCast(from.GetType().ManagedClass, to.GetType().ManagedClass);
+#else
+    return to.IsAssignableFrom(from);
+#endif
 }
 
 bool ScriptingObject::CanCast(const MClass* from, const MClass* to)
@@ -512,10 +522,10 @@ bool ManagedScriptingObject::CreateManaged()
 #endif
     {
         // Other thread already created the object before
-        if (const auto monoClass = GetClass())
+        if (const auto klass = GetClass())
         {
             // Reset managed to unmanaged pointer
-            MCore::ScriptingObject::SetInternalValues(monoClass, managedInstance, nullptr, nullptr);
+            MCore::ScriptingObject::SetInternalValues(klass, managedInstance, nullptr, nullptr);
         }
         MCore::GCHandle::Free(handle);
         return true;
@@ -674,9 +684,9 @@ DEFINE_INTERNAL_CALL(void) ObjectInternal_ManagedInstanceCreated(MObject* manage
         actor->SetName(String(typeClass->GetName()));
     }
 
-    MClass* monoClass = obj->GetClass();
+    MClass* klass = obj->GetClass();
     const Guid id = obj->GetID();
-    MCore::ScriptingObject::SetInternalValues(monoClass, managedInstance, obj, &id);
+    MCore::ScriptingObject::SetInternalValues(klass, managedInstance, obj, &id);
 
     // Register object
     if (!obj->IsRegistered())
@@ -727,7 +737,10 @@ DEFINE_INTERNAL_CALL(MObject*) ObjectInternal_FindObject(Guid* id, MTypeObject* 
         if (klass && !obj->Is(klass))
         {
             if (!skipLog)
-                LOG(Warning, "Found scripting object with ID={0} of type {1} that doesn't match type {2}. {3}", *id, String(obj->GetType().Fullname), String(klass->GetFullName()), LogContext::GetInfo());
+            {
+                LOG(Warning, "Found scripting object with ID={0} of type {1} that doesn't match type {2}", *id, String(obj->GetType().Fullname), String(klass->GetFullName()));
+                LogContext::Print(LogType::Warning);
+            }
             return nullptr;
         }
         return obj->GetOrCreateManagedInstance();
@@ -736,9 +749,10 @@ DEFINE_INTERNAL_CALL(MObject*) ObjectInternal_FindObject(Guid* id, MTypeObject* 
     if (!skipLog)
     {
         if (klass)
-            LOG(Warning, "Unable to find scripting object with ID={0}. Required type {1}. {2}", *id, String(klass->GetFullName()), LogContext::GetInfo());
+            LOG(Warning, "Unable to find scripting object with ID={0} of type {1}", *id, String(klass->GetFullName()));
         else
             LOG(Warning, "Unable to find scripting object with ID={0}", *id);
+        LogContext::Print(LogType::Warning);
     }
     return nullptr;
 }

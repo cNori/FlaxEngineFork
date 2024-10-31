@@ -242,6 +242,11 @@ namespace Flax.Build.Bindings
             }
 
             // Forward type
+            if (token.Value == "enum")
+            {
+                context.Tokenizer.SkipUntil(TokenType.Identifier);
+                token = context.Tokenizer.CurrentToken;
+            }
             if (token.Value == "class")
             {
                 context.Tokenizer.SkipUntil(TokenType.Identifier);
@@ -385,7 +390,22 @@ namespace Flax.Build.Bindings
 
                 // Read parameter type and name
                 currentParam.Type = ParseType(ref context);
-                currentParam.Name = context.Tokenizer.ExpectToken(TokenType.Identifier).Value;
+                token = context.Tokenizer.NextToken();
+                if (token.Type == TokenType.Identifier)
+                {
+                    currentParam.Name = token.Value;
+                }
+                // Support nameless arguments. assume optional usage
+                else
+                {
+                    context.Tokenizer.PreviousToken();
+                    if (string.IsNullOrEmpty(currentParam.Attributes))
+                        currentParam.Attributes = "Optional";
+                    else
+                        currentParam.Attributes += ", Optional";
+                    currentParam.Name = $"namelessArg{parameters.Count}";
+                }
+                
                 if (currentParam.IsOut && (currentParam.Type.IsPtr || currentParam.Type.IsRef) && currentParam.Type.Type.EndsWith("*"))
                 {
                     // Pointer to value passed as output pointer
@@ -589,7 +609,13 @@ namespace Flax.Build.Bindings
                 token = context.Tokenizer.NextToken();
                 if (!desc.IsDeprecated && token.Value == "DEPRECATED")
                 {
-                    desc.IsDeprecated = true;
+                    token = context.Tokenizer.NextToken();
+                    string message = "";
+                    if (token.Type == TokenType.LeftParent)
+                        context.Tokenizer.SkipUntil(TokenType.RightParent, out message);
+                    else
+                        context.Tokenizer.PreviousToken();
+                    desc.DeprecatedMessage = message.Trim('"');
                 }
                 else
                 {
@@ -698,7 +724,13 @@ namespace Flax.Build.Bindings
                 token = context.Tokenizer.NextToken();
                 if (!desc.IsDeprecated && token.Value == "DEPRECATED")
                 {
-                    desc.IsDeprecated = true;
+                    token = context.Tokenizer.NextToken();
+                    string message = "";
+                    if (token.Type == TokenType.LeftParent)
+                        context.Tokenizer.SkipUntil(TokenType.RightParent, out message);
+                    else
+                        context.Tokenizer.PreviousToken();
+                    desc.DeprecatedMessage = message.Trim('"');
                 }
                 else
                 {
@@ -797,8 +829,14 @@ namespace Flax.Build.Bindings
                 }
                 else if (!desc.IsDeprecated && token.Value == "DEPRECATED")
                 {
-                    desc.IsDeprecated = true;
-                    context.Tokenizer.NextToken();
+                    token = context.Tokenizer.NextToken();
+                    string message = "";
+                    if (token.Type == TokenType.LeftParent)
+                    {
+                        context.Tokenizer.SkipUntil(TokenType.RightParent, out message);
+                        context.Tokenizer.NextToken();
+                    }
+                    desc.DeprecatedMessage = message.Trim('"');
                 }
                 else
                 {
@@ -808,6 +846,7 @@ namespace Flax.Build.Bindings
             }
 
             // Read return type
+            // Handle if "auto" later
             desc.ReturnType = ParseType(ref context);
 
             // Read name
@@ -818,14 +857,20 @@ namespace Flax.Build.Bindings
             // Read parameters
             desc.Parameters.AddRange(ParseFunctionParameters(ref context));
 
-            // Read ';' or 'const' or 'override' or '= 0' or '{'
+            // Read ';' or 'const' or 'override' or '= 0' or '{' or '-'
             while (true)
             {
-                var token = context.Tokenizer.ExpectAnyTokens(new[] { TokenType.SemiColon, TokenType.LeftCurlyBrace, TokenType.Equal, TokenType.Identifier });
+                var token = context.Tokenizer.ExpectAnyTokens(new[] { TokenType.SemiColon, TokenType.LeftCurlyBrace, TokenType.Equal, TokenType.Sub, TokenType.Identifier });
                 if (token.Type == TokenType.Equal)
                 {
                     context.Tokenizer.SkipUntil(TokenType.SemiColon);
                     break;
+                }
+                // Support auto FunctionName() -> Type
+                else if (token.Type == TokenType.Sub && desc.ReturnType.ToString() == "auto")
+                {
+                    context.Tokenizer.SkipUntil(TokenType.GreaterThan);
+                    desc.ReturnType = ParseType(ref context);
                 }
                 else if (token.Type == TokenType.Identifier)
                 {
@@ -960,7 +1005,7 @@ namespace Flax.Build.Bindings
                 propertyInfo.Getter = functionInfo;
             else
                 propertyInfo.Setter = functionInfo;
-            propertyInfo.IsDeprecated |= functionInfo.IsDeprecated;
+            propertyInfo.DeprecatedMessage = functionInfo.DeprecatedMessage;
             propertyInfo.IsHidden |= functionInfo.IsHidden;
 
             if (propertyInfo.Getter != null && propertyInfo.Setter != null)
@@ -1025,7 +1070,13 @@ namespace Flax.Build.Bindings
                 token = context.Tokenizer.NextToken();
                 if (!desc.IsDeprecated && token.Value == "DEPRECATED")
                 {
-                    desc.IsDeprecated = true;
+                    token = context.Tokenizer.NextToken();
+                    string message = "";
+                    if (token.Type == TokenType.LeftParent)
+                        context.Tokenizer.SkipUntil(TokenType.RightParent, out message);
+                    else
+                        context.Tokenizer.PreviousToken();
+                    desc.DeprecatedMessage = message.Trim('"');
                 }
                 else
                 {
@@ -1300,8 +1351,14 @@ namespace Flax.Build.Bindings
                 }
                 else if (!desc.IsDeprecated && token.Value == "DEPRECATED")
                 {
-                    desc.IsDeprecated = true;
-                    context.Tokenizer.NextToken();
+                    token = context.Tokenizer.NextToken();
+                    string message = "";
+                    if (token.Type == TokenType.LeftParent)
+                    {
+                        context.Tokenizer.SkipUntil(TokenType.RightParent, out message);
+                        context.Tokenizer.NextToken();
+                    }
+                    desc.DeprecatedMessage = message.Trim('"');
                 }
                 else
                 {
@@ -1317,10 +1374,16 @@ namespace Flax.Build.Bindings
             desc.Name = ParseName(ref context);
 
             // Read ';' or default value or array size or bit-field size
-            token = context.Tokenizer.ExpectAnyTokens(new[] { TokenType.SemiColon, TokenType.Equal, TokenType.LeftBracket, TokenType.Colon });
+            token = context.Tokenizer.ExpectAnyTokens(new[] { TokenType.SemiColon, TokenType.Equal, TokenType.LeftBracket, TokenType.LeftCurlyBrace, TokenType.Colon });
             if (token.Type == TokenType.Equal)
             {
                 context.Tokenizer.SkipUntil(TokenType.SemiColon, out desc.DefaultValue, false);
+            }
+            // Handle ex: API_FIELD() Type FieldName {DefaultValue};
+            else if (token.Type == TokenType.LeftCurlyBrace)
+            {
+                context.Tokenizer.SkipUntil(TokenType.SemiColon, out desc.DefaultValue, false);
+                desc.DefaultValue = '{' + desc.DefaultValue;
             }
             else if (token.Type == TokenType.LeftBracket)
             {

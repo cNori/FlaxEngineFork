@@ -127,7 +127,7 @@ PACK_STRUCT(struct Vertex {
     Color32 Color;
     });
 
-PACK_STRUCT(struct Data {
+GPU_CB_STRUCT(Data {
     Matrix ViewProjection;
     Float2 Padding;
     float ClipPosZBias;
@@ -2151,4 +2151,8 @@ void DebugDraw::DrawText(const StringView& text, const Transform& transform, con
     t.TimeLeft = duration;
 }
 
+void DebugDraw::Clear(void* context)
+{
+    DebugDraw::UpdateContext(context, MAX_float);
+}
 #endif

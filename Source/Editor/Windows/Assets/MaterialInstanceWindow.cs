@@ -249,7 +249,7 @@ namespace FlaxEditor.Windows.Assets
                 if (parameters.Length == 0)
                     return;
 
-                var parametersGroup = layout.Group("Parameters");
+                var parametersGroup = SurfaceUtils.InitGraphParametersGroup(layout);
                 var settingButton = parametersGroup.AddSettingsButton();
                 settingButton.Clicked += (image, button) => OnSettingsButtonClicked(image, button, proxy.Window);
                 var baseMaterial = materialInstance.BaseMaterial;
@@ -387,10 +387,10 @@ namespace FlaxEditor.Windows.Assets
             _undo.ActionDone += OnAction;
 
             // Toolstrip
-            _saveButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Save64, Save).LinkTooltip("Save");
+            _saveButton = _toolstrip.AddButton(Editor.Icons.Save64, Save).LinkTooltip("Save", ref inputOptions.Save);
             _toolstrip.AddSeparator();
-            _undoButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Undo64, _undo.PerformUndo).LinkTooltip($"Undo ({inputOptions.Undo})");
-            _redoButton = (ToolStripButton)_toolstrip.AddButton(Editor.Icons.Redo64, _undo.PerformRedo).LinkTooltip($"Redo ({inputOptions.Redo})");
+            _undoButton = _toolstrip.AddButton(Editor.Icons.Undo64, _undo.PerformUndo).LinkTooltip("Undo", ref inputOptions.Undo);
+            _redoButton = _toolstrip.AddButton(Editor.Icons.Redo64, _undo.PerformRedo).LinkTooltip("Redo", ref inputOptions.Redo);
             _toolstrip.AddSeparator();
             _toolstrip.AddButton(editor.Icons.Docs64, () => Platform.OpenUrl(Utilities.Constants.DocsUrl + "manual/graphics/materials/instanced-materials/index.html")).LinkTooltip("See documentation to learn more");
 
