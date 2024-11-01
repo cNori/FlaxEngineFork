@@ -390,22 +390,7 @@ namespace Flax.Build.Bindings
 
                 // Read parameter type and name
                 currentParam.Type = ParseType(ref context);
-                token = context.Tokenizer.NextToken();
-                if (token.Type == TokenType.Identifier)
-                {
-                    currentParam.Name = token.Value;
-                }
-                // Support nameless arguments. assume optional usage
-                else
-                {
-                    context.Tokenizer.PreviousToken();
-                    if (string.IsNullOrEmpty(currentParam.Attributes))
-                        currentParam.Attributes = "Optional";
-                    else
-                        currentParam.Attributes += ", Optional";
-                    currentParam.Name = $"namelessArg{parameters.Count}";
-                }
-                
+                currentParam.Name = context.Tokenizer.ExpectToken(TokenType.Identifier).Value;
                 if (currentParam.IsOut && (currentParam.Type.IsPtr || currentParam.Type.IsRef) && currentParam.Type.Type.EndsWith("*"))
                 {
                     // Pointer to value passed as output pointer
