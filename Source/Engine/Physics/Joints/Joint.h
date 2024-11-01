@@ -320,7 +320,7 @@ public:
     /// <summary>
     /// [Deprecated in v1.9, removed in v2.0]
     /// </summary>
-    API_PROPERTY() DEPRECATED Vector3 GetTargetAnchor() const
+    API_PROPERTY() DEPRECATED() Vector3 GetTargetAnchor() const
     {
         return LocalPoseActor1.Translation;
     }
@@ -328,12 +328,12 @@ public:
     /// <summary>
     /// [Deprecated in v1.9, removed in v2.0]
     /// </summary>
-    API_PROPERTY() DEPRECATED void SetTargetAnchor(const Vector3& value);
+    API_PROPERTY() DEPRECATED() void SetTargetAnchor(const Vector3& value);
 
     /// <summary>
     /// [Deprecated in v1.9, removed in v2.0]
     /// </summary>
-    API_PROPERTY() DEPRECATED Quaternion GetTargetAnchorRotation() const
+    API_PROPERTY() DEPRECATED() Quaternion GetTargetAnchorRotation() const
     {
         return LocalPoseActor1.Orientation;
     }
@@ -341,22 +341,22 @@ public:
     /// <summary>
     /// [Deprecated in v1.9, removed in v2.0]
     /// </summary>
-    API_PROPERTY() DEPRECATED void SetTargetAnchorRotation(const Quaternion& value);
+    API_PROPERTY() DEPRECATED() void SetTargetAnchorRotation(const Quaternion& value);
 
     /// <summary>
     /// [Deprecated in v1.9, removed in v2.0]
     /// </summary>
-    API_FIELD() DEPRECATED ScriptingObjectReference<Actor> Target;
+    API_FIELD() DEPRECATED() ScriptingObjectReference<Actor> Target;
 
     /// <summary>
     /// [Deprecated in v1.9, removed in v2.0]
     /// </summary>
-    API_FUNCTION() DEPRECATED void SetJointLocation(const Vector3& location);
+    API_FUNCTION() DEPRECATED() void SetJointLocation(const Vector3& location);
 
     /// <summary>
     /// [Deprecated in v1.9, removed in v2.0]
     /// </summary>
-    API_FUNCTION() DEPRECATED void SetJointOrientation(const Quaternion& orientation);
+    API_FUNCTION() DEPRECATED() void SetJointOrientation(const Quaternion& orientation);
 #else
 #ifndef STRING2
 #define STRING2(x) #x
