@@ -146,19 +146,14 @@ namespace FlaxEditor.Utilities
 
         /// <summary>
         /// Formats the amount of bytes to get a human-readable data size in bytes with abbreviation. Eg. 32 kB
+        /// [Deprecated in v1.9]
         /// </summary>
         /// <param name="bytes">The bytes.</param>
         /// <returns>The formatted amount of bytes.</returns>
+        [Obsolete("Use FormatBytesCount with ulong instead")]
         public static string FormatBytesCount(int bytes)
         {
-            int order = 0;
-            while (bytes >= 1024 && order < MemorySizePostfixes.Length - 1)
-            {
-                order++;
-                bytes /= 1024;
-            }
-
-            return string.Format("{0:0.##} {1}", bytes, MemorySizePostfixes[order]);
+            return FormatBytesCount((ulong)bytes);
         }
 
         /// <summary>
@@ -169,12 +164,15 @@ namespace FlaxEditor.Utilities
         public static string FormatBytesCount(ulong bytes)
         {
             int order = 0;
+            ulong bytesPrev = bytes;
             while (bytes >= 1024 && order < MemorySizePostfixes.Length - 1)
             {
+                bytesPrev = bytes;
                 order++;
                 bytes /= 1024;
             }
-
+            if (order >= 3) // GB or higher use up to 2 decimal places for more precision
+                return string.Format("{0:0.##} {1}", FlaxEngine.Utils.RoundTo2DecimalPlaces(bytesPrev / 1024.0f), MemorySizePostfixes[order]);
             return string.Format("{0:0.##} {1}", bytes, MemorySizePostfixes[order]);
         }
 
@@ -252,6 +250,8 @@ namespace FlaxEditor.Utilities
 
         internal static Int2 DrawCurveTicks(DrawCurveTick drawTick, float[] tickSteps, ref float[] tickStrengths, float min, float max, float pixelRange, float minDistanceBetweenTicks = 20, float maxDistanceBetweenTicks = 60)
         {
+            if (pixelRange <= Mathf.Epsilon || maxDistanceBetweenTicks <= minDistanceBetweenTicks)
+                return Int2.Zero;
             if (tickStrengths == null || tickStrengths.Length != tickSteps.Length)
                 tickStrengths = new float[tickSteps.Length];
 
@@ -288,7 +288,7 @@ namespace FlaxEditor.Utilities
                     continue;
 
                 // Draw all ticks
-                int l = Mathf.Clamp(smallestTick + level, 0, tickSteps.Length - 1);
+                int l = Mathf.Clamp(smallestTick + level, 0, tickSteps.Length - 2);
                 var lStep = tickSteps[l];
                 var lNextStep = tickSteps[l + 1];
                 int startTick = Mathf.FloorToInt(min / lStep);
@@ -1434,6 +1434,7 @@ namespace FlaxEditor.Utilities
             inputActions.Add(options => options.SelectAll, Editor.Instance.SceneEditing.SelectAllScenes);
             inputActions.Add(options => options.DeselectAll, Editor.Instance.SceneEditing.DeselectAllScenes);
             inputActions.Add(options => options.Delete, Editor.Instance.SceneEditing.Delete);
+            inputActions.Add(options => options.GroupSelectedActors, Editor.Instance.SceneEditing.CreateParentForSelectedActors);
             inputActions.Add(options => options.Search, () => Editor.Instance.Windows.SceneWin.Search());
             inputActions.Add(options => options.MoveActorToViewport, Editor.Instance.UI.MoveActorToViewport);
             inputActions.Add(options => options.AlignActorWithViewport, Editor.Instance.UI.AlignActorWithViewport);
@@ -1470,6 +1471,28 @@ namespace FlaxEditor.Utilities
             inputActions.Add(options => options.OpenScriptsProject, () => Editor.Instance.CodeEditing.OpenSolution());
             inputActions.Add(options => options.GenerateScriptsProject, () => Editor.Instance.ProgressReporting.GenerateScriptsProjectFiles.RunAsync());
             inputActions.Add(options => options.RecompileScripts, ScriptsBuilder.Compile);
+        }
+
+        internal static string ToPathProject(string path)
+        {
+            if (path != null)
+            {
+                // Convert into path relative to the project (cross-platform)
+                var projectFolder = Globals.ProjectFolder;
+                if (path.StartsWith(projectFolder))
+                    path = path.Substring(projectFolder.Length + 1);
+            }
+            return path;
+        }
+
+        internal static string ToPathAbsolute(string path)
+        {
+            if (path != null)
+            {
+                // Convert into global path to if relative to the project
+                path = StringUtils.IsRelative(path) ? Path.Combine(Globals.ProjectFolder, path) : path;
+            }
+            return path;
         }
     }
 }

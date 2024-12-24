@@ -50,6 +50,9 @@ namespace Flax.Build
                         var platform = Platform.BuildPlatform;
                         var architecture = TargetArchitecture.AnyCPU;
                         var architectureName = "AnyCPU";
+
+                        if (!platform.CanBuildArchitecture(architecture))
+                            continue;
                         var toolchain = platform.TryGetToolchain(architecture);
 
                         var configuration = TargetConfiguration.Debug;
@@ -125,9 +128,7 @@ namespace Flax.Build
                                 continue;
                             if (!platform.HasRequiredSDKsInstalled && (!projectInfo.IsCSharpOnlyProject || platform != Platform.BuildPlatform))
                                 continue;
-
-                            // Prevent generating configuration data for Windows x86
-                            if (architecture == TargetArchitecture.x86 && targetPlatform == TargetPlatform.Windows)
+                            if (!platform.CanBuildArchitecture(architecture))
                                 continue;
 
                             string configurationText = targetName + '.' + platformName + '.' + configurationName;
@@ -179,8 +180,7 @@ namespace Flax.Build
             using (new ProfileEventScope("GenerateProjects"))
             {
                 // Pick the project format
-                HashSet<ProjectFormat> projectFormats = new HashSet<ProjectFormat>();
-
+                var projectFormats = new HashSet<ProjectFormat>();
                 if (Configuration.ProjectFormatVS2022)
                     projectFormats.Add(ProjectFormat.VisualStudio2022);
                 if (Configuration.ProjectFormatVS2019)
@@ -195,7 +195,6 @@ namespace Flax.Build
                     projectFormats.Add(ProjectFormat.VisualStudio2022);
                 if (!string.IsNullOrEmpty(Configuration.ProjectFormatCustom))
                     projectFormats.Add(ProjectFormat.Custom);
-
                 if (projectFormats.Count == 0)
                     projectFormats.Add(Platform.BuildPlatform.DefaultProjectFormat);
 
@@ -336,6 +335,12 @@ namespace Flax.Build
                                     var referenceTargets = GetProjectTargets(reference.Project);
                                     foreach (var referenceTarget in referenceTargets)
                                     {
+                                        // Skip referenced targets that don't meet this configuration specs (eg. Editor target should skip Android platform)
+                                        if (!referenceTarget.Platforms.Contains(configurationData.Platform))
+                                            continue;
+                                        if (!referenceTarget.Architectures.Contains(configurationData.Architecture))
+                                            continue;
+
                                         try
                                         {
                                             var referenceBuildOptions = GetBuildOptions(referenceTarget, configurationData.TargetBuildOptions.Platform, configurationData.TargetBuildOptions.Toolchain, configurationData.Architecture, configurationData.Configuration, reference.Project.ProjectFolderPath);
