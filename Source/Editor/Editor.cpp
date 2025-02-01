@@ -550,7 +550,7 @@ int32 Editor::LoadProduct()
         }
         if (!FileSystem::FileExists(files[0]))
         {
-            Platform::Fatal(TEXT("Cannot opoen selected project file because it doesn't exist."));
+            Platform::Fatal(TEXT("Cannot open selected project file because it doesn't exist."));
             return -1;
         }
         projectPath = StringUtils::GetDirectoryName(files[0]);
@@ -673,6 +673,7 @@ bool Editor::Init()
     Managed = New<ManagedEditor>();
 
     // Show splash screen
+    if (!CommandLine::Options.Headless.IsTrue())
     {
         PROFILE_CPU_NAMED("Splash");
         if (EditorImpl::Splash == nullptr)

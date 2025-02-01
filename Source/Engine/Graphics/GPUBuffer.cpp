@@ -5,6 +5,7 @@
 #include "GPUResourceProperty.h"
 #include "GPUBufferDescription.h"
 #include "PixelFormatExtensions.h"
+#include "RenderTask.h"
 #include "Async/Tasks/GPUCopyResourceTask.h"
 #include "Engine/Core/Utilities.h"
 #include "Engine/Core/Types/String.h"
@@ -70,6 +71,15 @@ GPUBufferDescription GPUBufferDescription::ToStagingReadback() const
     return desc;
 }
 
+GPUBufferDescription GPUBufferDescription::ToStaging() const
+{
+    auto desc = *this;
+    desc.Usage = GPUResourceUsage::Staging;
+    desc.Flags = GPUBufferFlags::None;
+    desc.InitData = nullptr;
+    return desc;
+}
+
 bool GPUBufferDescription::Equals(const GPUBufferDescription& other) const
 {
     return Size == other.Size
@@ -120,6 +130,16 @@ GPUBuffer::GPUBuffer()
 {
     // Buffer with size 0 is considered to be invalid
     _desc.Size = 0;
+}
+
+bool GPUBuffer::IsStaging() const
+{
+    return _desc.Usage == GPUResourceUsage::StagingReadback || _desc.Usage == GPUResourceUsage::StagingUpload || _desc.Usage == GPUResourceUsage::Staging;
+}
+
+bool GPUBuffer::IsDynamic() const
+{
+    return _desc.Usage == GPUResourceUsage::Dynamic;
 }
 
 bool GPUBuffer::Init(const GPUBufferDescription& desc)
@@ -214,7 +234,7 @@ bool GPUBuffer::DownloadData(BytesContainer& result)
         LOG(Warning, "Cannot download GPU buffer data from an empty buffer.");
         return true;
     }
-    if (_desc.Usage == GPUResourceUsage::StagingReadback || _desc.Usage == GPUResourceUsage::Dynamic)
+    if (_desc.Usage == GPUResourceUsage::StagingReadback || _desc.Usage == GPUResourceUsage::Dynamic || _desc.Usage == GPUResourceUsage::Staging)
     {
         // Use faster path for staging resources
         return GetData(result);
@@ -358,6 +378,16 @@ void GPUBuffer::SetData(const void* data, uint32 size)
         Log::ArgumentOutOfRangeException(TEXT("Buffer.SetData"));
         return;
     }
+
+    if (_desc.Usage == GPUResourceUsage::Default && GPUDevice::Instance->IsRendering())
+    {
+        // Upload using the context (will use internal staging buffer inside command buffer)
+        RenderContext::GPULocker.Lock();
+        GPUDevice::Instance->GetMainContext()->UpdateBuffer(this, data, size);
+        RenderContext::GPULocker.Unlock();
+        return;
+    }
+
     void* mapped = Map(GPUResourceMapMode::Write);
     if (!mapped)
         return;

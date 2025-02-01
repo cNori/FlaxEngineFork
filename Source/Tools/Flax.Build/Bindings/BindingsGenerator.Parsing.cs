@@ -188,6 +188,13 @@ namespace Flax.Build.Bindings
                         token = context.Tokenizer.NextToken();
                         if (token.Type == TokenType.Multiply)
                             tag.Value += token.Value;
+                        else if (token.Type == TokenType.LeftAngleBracket)
+                        {
+                            context.Tokenizer.SkipUntil(TokenType.RightAngleBracket, out var s);
+                            tag.Value += '<';
+                            tag.Value += s;
+                            tag.Value += '>';
+                        }
                         else
                             context.Tokenizer.PreviousToken();
                         parameters.Add(tag);
@@ -273,7 +280,6 @@ namespace Flax.Build.Bindings
                         type.GenericArgs.Add(argType);
                     token = context.Tokenizer.NextToken();
                 } while (token.Type != TokenType.RightAngleBracket);
-
                 token = context.Tokenizer.NextToken();
             }
 
@@ -405,7 +411,7 @@ namespace Flax.Build.Bindings
                         currentParam.Attributes += ", Optional";
                     currentParam.Name = $"namelessArg{parameters.Count}";
                 }
-                
+
                 if (currentParam.IsOut && (currentParam.Type.IsPtr || currentParam.Type.IsRef) && currentParam.Type.Type.EndsWith("*"))
                 {
                     // Pointer to value passed as output pointer
@@ -545,15 +551,19 @@ namespace Flax.Build.Bindings
                     }
                     if (token.Type == TokenType.LeftAngleBracket)
                     {
-                        var genericType = context.Tokenizer.ExpectToken(TokenType.Identifier);
-                        token = context.Tokenizer.ExpectToken(TokenType.RightAngleBracket);
-                        inheritType.GenericArgs = new List<TypeInfo>
+                        inheritType.GenericArgs = new List<TypeInfo>();
+                        while (true)
                         {
-                            new TypeInfo
-                            {
-                                Type = genericType.Value,
-                            }
-                        };
+                            token = context.Tokenizer.NextToken();
+                            if (token.Type == TokenType.RightAngleBracket)
+                                break;
+                            if (token.Type == TokenType.Comma)
+                                continue;
+                            if (token.Type == TokenType.Identifier)
+                                inheritType.GenericArgs.Add(new TypeInfo { Type = token.Value });
+                            else
+                                throw new ParseException(ref context, "Incorrect inheritance");
+                        }
 
                         // TODO: find better way to resolve this (custom base type attribute?)
                         if (inheritType.Type == "ShaderAssetTypeBase")
@@ -1526,16 +1536,54 @@ namespace Flax.Build.Bindings
             return desc;
         }
 
+        private static string ParseString(ref ParsingContext context)
+        {
+            // Read string (support multi-line string literals)
+            string str = string.Empty;
+            int startLine = -1;
+            while (true)
+            {
+                var token = context.Tokenizer.NextToken();
+                if (token.Type == TokenType.String)
+                {
+                    if (startLine == -1)
+                        startLine = context.Tokenizer.CurrentLine;
+                    else if (startLine != context.Tokenizer.CurrentLine)
+                        str += "\n";
+                    var tokenStr = token.Value;
+                    if (tokenStr.Length >= 2 && tokenStr[0] == '\"' && tokenStr[^1] == '\"')
+                        tokenStr = tokenStr.Substring(1, tokenStr.Length - 2);
+                    str += tokenStr;
+                }
+                else if (token.Type == TokenType.EndOfFile)
+                {
+                    break;
+                }
+                else
+                {
+                    if (str == string.Empty)
+                        throw new Exception($"Expected {TokenType.String}, but got {token} at line {context.Tokenizer.CurrentLine}.");
+                    context.Tokenizer.PreviousToken();
+                    break;
+                }
+            }
+
+            // Apply automatic formatting for special characters
+            str = str.Replace("\\\"", "\"");
+            str = str.Replace("\\n", "\n");
+            str = str.Replace("\\\n", "\n");
+            str = str.Replace("\\\r\n", "\n");
+            str = str.Replace("\t", "    ");
+            str = str.Replace("\\t", "    ");
+            return str;
+        }
+
         private static InjectCodeInfo ParseInjectCode(ref ParsingContext context)
         {
             context.Tokenizer.ExpectToken(TokenType.LeftParent);
             var desc = new InjectCodeInfo();
             context.Tokenizer.SkipUntil(TokenType.Comma, out desc.Lang);
-            desc.Code = context.Tokenizer.ExpectToken(TokenType.String).Value.Replace("\\\"", "\"");
-            desc.Code = desc.Code.Substring(1, desc.Code.Length - 2);
-            desc.Code = desc.Code.Replace("\\\n", "\n");
-            desc.Code = desc.Code.Replace("\\\r\n", "\n");
-            desc.Code = desc.Code.Replace("\t", "    ");
+            desc.Code = ParseString(ref context);
             context.Tokenizer.ExpectToken(TokenType.RightParent);
             return desc;
         }
@@ -1552,16 +1600,30 @@ namespace Flax.Build.Bindings
             // Read parameters from the tag
             var tagParams = ParseTagParameters(ref context);
 
-            // Read 'typedef' keyword
+            // Read 'typedef' or 'using' keyword
             var token = context.Tokenizer.NextToken();
-            if (token.Value != "typedef")
-                throw new ParseException(ref context, $"Invalid {ApiTokens.Typedef} usage (expected 'typedef' keyword but got '{token.Value} {context.Tokenizer.NextToken().Value}').");
+            var isUsing = token.Value == "using";
+            if (token.Value != "typedef" && !isUsing)
+                throw new ParseException(ref context, $"Invalid {ApiTokens.Typedef} usage (expected 'typedef' or 'using' keyword but got '{token.Value} {context.Tokenizer.NextToken().Value}').");
 
-            // Read type definition
-            desc.Type = ParseType(ref context);
+            if (isUsing)
+            {
+                // Read name
+                desc.Name = ParseName(ref context);
 
-            // Read name
-            desc.Name = ParseName(ref context);
+                context.Tokenizer.ExpectToken(TokenType.Equal);
+
+                // Read type definition
+                desc.Type = ParseType(ref context);
+            }
+            else
+            {
+                // Read type definition
+                desc.Type = ParseType(ref context);
+
+                // Read name
+                desc.Name = ParseName(ref context);
+            }
 
             // Read ';'
             context.Tokenizer.ExpectToken(TokenType.SemiColon);

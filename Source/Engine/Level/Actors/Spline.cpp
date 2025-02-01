@@ -158,10 +158,10 @@ float Spline::GetSplineLength() const
         const auto& b = Curve[i];
         Vector3 prevPoint = a.Value.Translation * scale;
 
-        const float length = Math::Abs(b.Time - a.Time);
+        const float tangentScale = Math::Abs(b.Time - a.Time) / 3.0f;
         Vector3 leftTangent, rightTangent;
-        AnimationUtils::GetTangent(a.Value.Translation, a.TangentOut.Translation, length, leftTangent);
-        AnimationUtils::GetTangent(b.Value.Translation, b.TangentIn.Translation, length, rightTangent);
+        AnimationUtils::GetTangent(a.Value.Translation, a.TangentOut.Translation, tangentScale, leftTangent);
+        AnimationUtils::GetTangent(b.Value.Translation, b.TangentIn.Translation, tangentScale, rightTangent);
 
         for (int32 slice = 1; slice < slices; slice++)
         {
@@ -189,10 +189,10 @@ float Spline::GetSplineSegmentLength(int32 index) const
     const Vector3 scale = _transform.Scale;
     Vector3 prevPoint = a.Value.Translation * scale;
     {
-        const float length = Math::Abs(b.Time - a.Time);
+        const float tangentScale = Math::Abs(b.Time - a.Time) / 3.0f;
         Vector3 leftTangent, rightTangent;
-        AnimationUtils::GetTangent(a.Value.Translation, a.TangentOut.Translation, length, leftTangent);
-        AnimationUtils::GetTangent(b.Value.Translation, b.TangentIn.Translation, length, rightTangent);
+        AnimationUtils::GetTangent(a.Value.Translation, a.TangentOut.Translation, tangentScale, leftTangent);
+        AnimationUtils::GetTangent(b.Value.Translation, b.TangentIn.Translation, tangentScale, rightTangent);
 
         for (int32 slice = 1; slice < slices; slice++)
         {
@@ -476,11 +476,9 @@ void Spline::GetKeyframes(MArray* data)
     Platform::MemoryCopy(MCore::Array::GetAddress(data), Curve.GetKeyframes().Get(), sizeof(Keyframe) * Curve.GetKeyframes().Count());
 }
 
-void Spline::SetKeyframes(MArray* data)
+void Spline::SetKeyframes(MArray* data, int32 keySize)
 {
-    const int32 count = MCore::Array::GetLength(data);
-    Curve.GetKeyframes().Resize(count, false);
-    Platform::MemoryCopy(Curve.GetKeyframes().Get(), MCore::Array::GetAddress(data), sizeof(Keyframe) * count);
+    Curve = Span<byte>(MCore::Array::GetAddress<byte>(data), keySize * MCore::Array::GetLength(data));
     UpdateSpline();
 }
 
