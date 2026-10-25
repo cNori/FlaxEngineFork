@@ -82,7 +82,8 @@ public:
             OutOfMemory,
             EmptyArchetype,
             CapacityOverflow,
-            InvalidEntity
+            InvalidEntity,
+            NotFound,
         };
 
         struct Entry
@@ -133,7 +134,7 @@ public:
             uint32 DataCapacity;
             // The active row count
             uint32 ActiveRowCount;
-            //max StrideSize per Column is limited, if u need more WTF are u doing
+            //max StrideSize per Column is limited to 512 bytes, if u need more WTF are u doing
             const static uint32 MaxRowStrideSize = 512;
             //size of packed components
             uint32 RowStride = sizeof(uint64);
@@ -383,7 +384,6 @@ public:
                 entry.ConstructComponents(OutEntity.Generation);
             return result;
         }
-
         Result DestroyEntity(Entity& entity)
         {
             if (entity.ID >= Registry.Count() || entity.Generation == 0)
@@ -403,10 +403,64 @@ public:
             return Result::Ok;
         }
 
-        void RemoveEntity()
+        Result FindComponentsOfType(Entity& entity, ComponentDescriptor descriptor, Array<uint32>& where)
         {
+            where.Clear();
+            Entry& entry = Registry[entity.ID];
+            //component type fetch
+            for (size_t i = 0; i < entry.Types.Count(); i++)
+            {
+                if (descriptor.TypeID == entry.Types[i].TypeID)
+                {
+                    where.Add(i);
+                }
+            }
+            return where.Count() != 0 ? Result::Ok : Result::NotFound;
+        }
+
+        bool HasComponentTypesOfType(Entity& entity, ComponentDescriptor descriptor)
+        {
+            Entry& entry = Registry[entity.ID];
+            //component type fetch
+            for (size_t i = 0; i < entry.Types.Count(); i++)
+            {
+                if (descriptor.TypeID == entry.Types[i].TypeID)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void GetComponentsOfType(Entity& entity, ComponentDescriptor descriptor, Array<IComponent*>& components)
+        {
+            Array<uint32> where;
+            if(FindComponentsOfType(entity, descriptor, where) == Result::Ok)
+            {
+
+            }
+
+            //Array<uint32> __;
+            //const auto& descriptor = descriptors[component.GetComponentTypeId()];
+
+            //read the entry
+            //return FindComponentType(entity, descriptor, __);
+        }
+
+        Result AddComponent(Entity& entity, IComponent component)
+        {
+            Entry& entry = Registry[entity.ID];
+            const uint32 rowIndex = entity.Generation - 1;
+            auto types = entry.Types;
+
+
+
+            
+
 
         }
+
+
         void FindArchetypeMatch(const Entry::Archetypes& Archetypes, int32& OutEntryID, Array<Entry::IndexRemapper>& OutOrderRemap)
         {
             OutOrderRemap.Resize(Archetypes.Count(), false);
@@ -417,7 +471,7 @@ public:
             //scan Registry for Archetypes
             for (int32 i = 0; i < Registry.Count(); i++)
             {
-                auto rtypes = Registry[i].Types;
+                const auto& rtypes = Registry[i].Types;
                 if (rtypes.Count() != Archetypes.Count())
                     continue;
 
@@ -464,11 +518,13 @@ public:
             //done we are done this is end of func
             OutOrderRemap.Clear();
         }
+        
+
 
 
         void GetEntityArchetypes()
         {
-
+            //TODO: implement it
         }
     };
 private:
@@ -492,6 +548,8 @@ public:
             descriptor.Construct = Construct;
             descriptors.Add(descriptor);
             Types.Add(TypeName, componentTypeId);
+
+            return componentTypeId;
         }
         else
         {
@@ -503,6 +561,8 @@ public:
                 PLATFORM_DEBUG_BREAK;
             }
             Platform::Assert("Duplicate component registration", __FILE__, __LINE__);
+
+            //return -1;
         }
     }
 };
