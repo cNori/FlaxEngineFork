@@ -35,10 +35,22 @@ struct Entity
 {
 private:
     //for now this is not shared and potentially unsafe access can happen
-    uint64 ID;
-    uint64 Generation;
-
+    
+    //ID corresponds to the Entry index in the registry
+    uint32 ID;
+    //Generation corresponds to the index in the Entry[ID].Data[archetype + Generation]
+    //by doing ID then Generation with find the data block where Components data is living
+    //fast
+    uint32 Generation;
+private:
     friend class EntityComponentSystem::Registry;
+public:
+    //template<typename T>
+    //entity.HasComponent<T>();
+    //entity.GetComponent<T>(instanceIndex);
+    //entity.GetComponents<T>();
+    //entity.AddComponent<T>(component);
+    //entity.DestroyComponent<T>(component.ID);
 };
 
 /// <summary>
@@ -50,6 +62,8 @@ struct IComponent
 private:
     uint32 ID;
     uint32 Owner;
+private:
+    friend class EntityComponentSystem::Registry;
 };
 
 /// <summary>
@@ -73,21 +87,27 @@ public:
 
     class Registry
     {
+    public:
         enum Result
         {
             Ok,
             //errors below
             DoubleInitCall,
             ArchetypeGroupToBig,
-            OutOfMemory,
-            EmptyArchetype,
-            CapacityOverflow,
             InvalidEntity,
+            EmptyArchetype,
+            //memory management
+            BufferMismatch,
+            OutOfMemory,
+            CapacityOverflow,
+            //miscellaneous stuff
             NotFound,
         };
-
         struct Entry
         {
+        public:
+            typedef Array<EntityComponentSystem::ComponentDescriptor> Archetypes;
+        private:
             struct IndexRemapper
             {
                 int32 From;
@@ -102,7 +122,6 @@ public:
             //Archetype<C>,Archetype<A>, Archetype<B>
             //sequence is the same so it can be sorted
             //there is no point of holding ABC and CAB in 2 Entry's
-            typedef Array<EntityComponentSystem::ComponentDescriptor> Archetypes;
             Archetypes Types;
 
             //Archetype:
@@ -155,7 +174,7 @@ public:
                 {
                     size += Types[i].Size;
                 }
-                if(size > MaxRowStrideSize)
+                if (size > MaxRowStrideSize)
                     return Result::ArchetypeGroupToBig;
 
                 //set the stride
@@ -234,10 +253,10 @@ public:
                 //crossing system-user boundary 3 times on windows
                 //it cant be used even has wrong sig
                 //void* newData = AllocatorExt::ReallocAligned(Data, oldSize, newSize, alignof(Chunk));
-                
+
                 //manual emulation
                 //will be crap because of crossing user->system->user boundary 3 times on windows
-                if(oldSize == newSize)
+                if (oldSize == newSize)
                     return Result::Ok;
 
                 //TODO: Probably general log in ECS Entry got expanded
@@ -258,7 +277,7 @@ public:
             }
             ~Entry()
             {
-                if(Data != nullptr)
+                if (Data != nullptr)
                 {
                     //TODO: Probably general log in ECS system Entry got pop-ed
                     //will allow for better memory debug
@@ -279,7 +298,7 @@ public:
                 //cNori Node:
                 //umm this is where magic happens
                 //just in case leaving this comment and comment below for future reference
-                
+
                 //It is constructing objects pre allocated memory
                 //this place controls how components are created
                 //also see: memory comment layout above Data
@@ -300,7 +319,7 @@ public:
 
 
                 //TODO: reuse objects marked as deleted and correct the GetNextGeneration
-                //and cheek logic for handling so entities does not have dangling IDs
+                //and cheek logic for handling so entities so we don't have dangling IDs
                 //but for now
                 //we will do ActiveRowCount so when we are do advance constructors are called 
                 auto gen = ActiveRowCount - 1;
@@ -332,13 +351,10 @@ public:
 
             void DestroyComponents(uint32 rowIndex)
             {
-                auto gen = ActiveRowCount - 1;
                 const uint32 chunkIndex = rowIndex / RowsPerChunk;
                 const uint32 rowInChunk = rowIndex % RowsPerChunk;
-
                 auto* chunkBytes = reinterpret_cast<uint8*>(&Data[chunkIndex]);
                 auto* row = chunkBytes + static_cast<uint64>(rowInChunk) * RowStride;
-
                 uint32 offset = 0;
                 for (int32 i = 0; i < Types.Count(); i++)
                 {
@@ -347,13 +363,86 @@ public:
                     offset += type.Size;
                 }
             }
-        };
-        Array<Entry> Registry;
 
+
+            void* GetComponentData(uint32 generation, uint32 where)
+            {
+                if (!Data || RowsPerChunk == 0 ||
+                    generation >= ActiveRowCount ||
+                    where >= Types.Count())
+                {
+                    return nullptr;
+                }
+
+                const uint32 chunkIndex = generation / RowsPerChunk;
+                const uint32 rowInChunk = generation % RowsPerChunk;
+
+                if (chunkIndex >= DataCapacity)
+                    return nullptr;
+
+                auto* chunkBytes = reinterpret_cast<uint8*>(&Data[chunkIndex]);
+                auto* row = chunkBytes + static_cast<uint64>(rowInChunk) * RowStride;
+
+                uint64 componentOffset = 0;
+                for (uint32 i = 0; i < where; ++i)
+                    componentOffset += Types[i].Size;
+
+                return row + componentOffset;
+            }
+
+            Result GetComponentBlockInfo(
+                uint32 rowIndex,
+                uint8*& outChunkBytes,
+                void*& outBlockData,
+                uint32& outBlockSize)
+            {
+                outChunkBytes = nullptr;
+                outBlockData = nullptr;
+                outBlockSize = 0;
+
+                if (!Data || RowsPerChunk == 0 || rowIndex >= ActiveRowCount)
+                    return Result::InvalidEntity;
+
+                const uint32 chunkIndex = rowIndex / RowsPerChunk;
+                const uint32 rowInChunk = rowIndex % RowsPerChunk;
+                if (chunkIndex >= DataCapacity)
+                    return Result::InvalidEntity;
+
+                outChunkBytes = reinterpret_cast<uint8*>(&Data[chunkIndex]);
+                outBlockData = outChunkBytes + static_cast<uint64>(rowInChunk) * RowStride;
+                outBlockSize = RowStride;
+                return Result::Ok;
+            }
+
+            struct ComponentData
+            {
+                void* Data;
+                uint32 Size;
+            };
+            void SplitToComponents(uint8* chunkBytes, void* blockData, Array<ComponentData>& components)
+            {
+                components.Clear();
+                uint32 offset = 0;
+                for (int32 i = 0; i < Types.Count(); ++i)
+                {
+                    ComponentData component;
+                    component.Data = static_cast<uint8*>(blockData) + offset;
+                    component.Size = Types[i].Size;
+                    components.Add(component);
+
+                    offset += Types[i].Size;
+                }
+            }
+
+            friend class EntityComponentSystem;
+        };
+    private:
+        Array<Entry> Registry;
+    private:
         Result CreateEntity(const Entry::Archetypes& Archetypes, Entity& OutEntity)
         {
             // 1. Find matching Entry and input-to-entry order remap.
-            Array<int> Map;
+            Array<Entry::IndexRemapper> Map = {};
             int EntryID;
             FindArchetypeMatch(Archetypes, EntryID, Map);
             if (EntryID == -1)
@@ -376,21 +465,21 @@ public:
                 OutEntity.Generation = Registry[EntryID].GetNextGeneration();
                 OutEntity.ID = EntryID;
             }
-            
+
             // 3. Construct each component in the Entry for Entity.
             Entry& entry = Registry[OutEntity.ID];
             auto result = entry.EnsureSlots(entry.ActiveRowCount + 1);
-            if(result == Result::Ok)
+            if (result == Result::Ok)
                 entry.ConstructComponents(OutEntity.Generation);
             return result;
         }
         Result DestroyEntity(Entity& entity)
         {
-            if (entity.ID >= Registry.Count() || entity.Generation == 0)
+            if (entity.ID >= Registry.Count() || entity.Generation == MAX_uint32)
                 return Result::InvalidEntity;
 
             Entry& entry = Registry[entity.ID];
-            const uint32 rowIndex = entity.Generation - 1;
+            const uint32 rowIndex = entity.Generation;
 
             if (!entry.IsRowAlive(rowIndex))
                 return Result::InvalidEntity;
@@ -398,27 +487,11 @@ public:
             entry.DestroyComponents(rowIndex); // reverse component order
             entry.MarkRowDead(rowIndex);
 
-            entity.ID = MAX_uint64;
+            entity.ID = MAX_uint32;
             entity.Generation = 0;
             return Result::Ok;
         }
-
-        Result FindComponentsOfType(Entity& entity, ComponentDescriptor descriptor, Array<uint32>& where)
-        {
-            where.Clear();
-            Entry& entry = Registry[entity.ID];
-            //component type fetch
-            for (size_t i = 0; i < entry.Types.Count(); i++)
-            {
-                if (descriptor.TypeID == entry.Types[i].TypeID)
-                {
-                    where.Add(i);
-                }
-            }
-            return where.Count() != 0 ? Result::Ok : Result::NotFound;
-        }
-
-        bool HasComponentTypesOfType(Entity& entity, ComponentDescriptor descriptor)
+        bool   HasComponentsOfType(Entity& entity, ComponentDescriptor descriptor)
         {
             Entry& entry = Registry[entity.ID];
             //component type fetch
@@ -431,36 +504,240 @@ public:
             }
             return false;
         }
-
-        void GetComponentsOfType(Entity& entity, ComponentDescriptor descriptor, Array<IComponent*>& components)
+        Result GetComponentsOfType(Entity& entity, ComponentDescriptor descriptor, Array<IComponent*>& components)
         {
-            Array<uint32> where;
-            if(FindComponentsOfType(entity, descriptor, where) == Result::Ok)
+            Array<Entry::ComponentData> ComponentData;
+            void* dataBlock;
+            uint32 dataSize;
+            uint8* chunkBytes;
+            Entry& entry = Registry[entity.ID];
+            auto result = entry.GetComponentBlockInfo(entity.Generation, chunkBytes, dataBlock, dataSize);
+            if (result != Result::Ok)
+                return result;
+            entry.SplitToComponents(chunkBytes, dataBlock, ComponentData);
+            Entry& entry = Registry[entity.ID];
+            //component type fetch
+            for (size_t i = 0; i < entry.Types.Count(); i++)
             {
+                if (descriptor.TypeID == entry.Types[i].TypeID)
+                {
+                    components.Add((IComponent*)ComponentData[i].Data);
+                }
+            }
+            return Result::Ok;
+        }
+        Result AddComponentOfType(Entity& entity, ComponentDescriptor descriptor, const IComponent* component)
+        {
+            //find new Archetype set
+            Entry::Archetypes ar = Registry[entity.ID].Types;
+            ar.Add(descriptor);
+            int32 entryID;
+            Array<Entry::IndexRemapper> orderRemap;
+            FindArchetypeMatch(ar, entryID, orderRemap);
+            if (entryID == -1)
+            {
+                // 1. If absent, create and initialize an Entry.
+                const int32 entryIndex = Registry.Count();
 
+                Entry entry;
+                Result result = entry.Init(ar);
+                if (result != Result::Ok)
+                    return result;
+
+                auto oldGeneration = entity.Generation;
+                Entry& oldEntry = Registry[entity.ID];
+
+                entity.Generation = entry.GetNextGeneration();
+                entity.ID = Registry.Count();
+                Registry.Add(MoveTemp(entry));
+
+                // 2. Construct each component in the Entry for Entity.
+                Entry& entry = Registry[entity.ID];
+                auto result = entry.EnsureSlots(entry.ActiveRowCount + 1);
+                if (result == Result::Ok)
+                {
+                    //cNori note:
+                    //we don't need to construct components it is simple memory move
+                    //but we need whole chunk of group of Archetypes {[A][B][C]} needs a copy
+                    //not 1 by one it will be stupid way to do it
+                    //also we don't care about the IndexRemapper it is new group of Archetypes
+
+                    //3. get component data and new place data
+                    void* oldDataBlock = nullptr;
+                    uint32 oldDataSize;
+                    uint8* _ = nullptr;
+                    result = oldEntry.GetComponentBlockInfo(oldGeneration, _, oldDataBlock, oldDataSize);
+                    if (result != Ok)
+                        return result;
+                    void* dataBlock = nullptr;
+                    uint32 dataSize;
+                    result = entry.GetComponentBlockInfo(entity.Generation, _, dataBlock, dataSize);
+                    if (result != Ok)
+                        return result;
+
+                    //wtf happen case just in case something will go horribly wrong
+                    if (oldDataSize != dataSize)
+                        return Result::BufferMismatch;
+
+                    //3. Copy component data to new place
+                    Platform::MemoryCopy(dataBlock, oldDataBlock, dataSize);
+
+                    //4. Append new data
+                    //time to pray the descriptor corresponds to the component
+                    Platform::MemoryCopy(static_cast<uint8*>(dataBlock) + dataSize, component, descriptor.Size);
+
+                    //5. clear old chunk and mark it dead for GC
+                    oldEntry.MarkRowDead(oldGeneration);
+                    Platform::MemoryClear(oldDataBlock, dataSize);
+                }
+            }
+            else
+            {
+                //1. Get current existing registry data
+                Array<Entry::ComponentData> currentComponentData;
+                auto& curentEntry = Registry[entity.ID];
+                void* oldDataBlock;
+                uint32 oldDataSize;
+                uint8* oldChunkBytes;
+                auto result = curentEntry.GetComponentBlockInfo(entity.Generation, oldChunkBytes, oldDataBlock, oldDataSize);
+                curentEntry.SplitToComponents(oldChunkBytes, oldDataBlock, currentComponentData);
+                curentEntry.MarkRowDead(entity.Generation);
+                Platform::MemoryClear(oldDataBlock, oldDataSize);
+
+                //2. Get existing registry data and remap entity to new entry
+                Array<Entry::ComponentData> componentData;
+                auto& entry = Registry[entryID];
+                void* dataBlock;
+                uint32 dataSize;
+                uint8* chunkBytes;
+                auto result = entry.EnsureSlots(entry.ActiveRowCount + 1);
+                if (result != Result::Ok)
+                    return result;
+                entity.Generation = entry.GetNextGeneration();
+                entity.ID = entryID;
+                auto result = entry.GetComponentBlockInfo(entity.Generation, chunkBytes, dataBlock, dataSize);
+                entry.SplitToComponents(chunkBytes, dataBlock, componentData);
+                //3. copy components based on IndexRemapper info
+                const uint32 newInputIndex = currentComponentData.Count();
+                uint32 newComponentSlot = MAX_uint32;
+
+                for (int32 i = 0; i < orderRemap.Count(); ++i)
+                {
+                    const auto& remap = orderRemap[i];
+
+                    if (remap.From == newInputIndex)
+                    {
+                        newComponentSlot = remap.To;
+                        continue;
+                    }
+
+                    //wtf happen case just in case something will go horribly wrong
+                    if (componentData[remap.To].Size != currentComponentData[remap.From].Size)
+                        return Result::BufferMismatch;
+
+                    Platform::MemoryCopy(componentData[remap.To].Data, currentComponentData[remap.From].Data, componentData[remap.From].Size);
+                }
+
+                //4. Append new data
+                //time to pray the descriptor corresponds to the component
+                Platform::MemoryCopy(componentData[newComponentSlot].Data, component, descriptor.Size);
+            }
+            return Result::Ok;
+        }
+        Result DestroyComponentOfType(Entity& entity, const IComponent* component)
+        {
+            //find new Archetype set
+            Entry::Archetypes ar = Registry[entity.ID].Types;
+            ar.RemoveAt(component->ID);
+            int32 entryID;
+            Array<Entry::IndexRemapper> orderRemap;
+            bool useIndexRemapper = orderRemap.Count() != 0;
+            FindArchetypeMatch(ar, entryID, orderRemap);
+
+            //cNori note:
+            //small amount of shenanigans here with memory here
+            //we need to copy upper and lower parts of data
+            //in case we pop a {[A][B][C]} and the [B] is pop-ed
+            //result is {[A][C]}
+            //- if is first component upper part dose not need copy
+            //- if is last component lower part dose not need copy
+            //- if we are at the middle A and B needs a copy
+            //and if the component->ID == 0 or Registry[entity.ID].Types.Count();
+            //skip 2 pass copy
+
+            //1. Get current existing data
+            Array<Entry::ComponentData> oldComponentData;
+            auto& oldEntry = Registry[entity.ID];
+            auto oldGeneration = entity.Generation;
+            void* oldDataBlock;
+            uint32 oldDataSize;
+            uint8* oldChunkBytes;
+            auto result = oldEntry.GetComponentBlockInfo(entity.Generation, oldChunkBytes, oldDataBlock, oldDataSize);
+            oldEntry.SplitToComponents(oldChunkBytes, oldDataBlock, oldComponentData);
+
+            //2. Get new entry
+            if (entryID == -1)
+            {
+                //absent, create and initialize an Entry.
+                Entry e;
+                Result result = e.Init(ar);
+                if (result != Result::Ok)
+                    return result;
+                Registry.Add(MoveTemp(e));
+                entryID = Registry.Count();
+            }
+            Entry& entry = Registry[entryID];
+            auto result = entry.EnsureSlots(entry.ActiveRowCount + 1);
+            if (result != Result::Ok)
+                return result;
+
+            Array<Entry::ComponentData> newComponentDataNest;
+            {
+                void* newDataBlock;
+                uint32 newDataSize;
+                uint8* newChunkBytes;
+                auto result = entry.GetComponentBlockInfo(entity.Generation, newChunkBytes, newDataBlock, newDataSize);
+                entry.SplitToComponents(newChunkBytes, newDataBlock, newComponentDataNest);
             }
 
-            //Array<uint32> __;
-            //const auto& descriptor = descriptors[component.GetComponentTypeId()];
+            if (useIndexRemapper)
+            {
+                for (int32 i = 0; i < orderRemap.Count(); ++i)
+                {
+                    const auto& remap = orderRemap[i];
 
-            //read the entry
-            //return FindComponentType(entity, descriptor, __);
+                    //wtf happen case just in case something will go horribly wrong
+                    if (newComponentDataNest[remap.To].Size != oldComponentData[remap.From].Size)
+                        return Result::BufferMismatch;
+
+                    Platform::MemoryCopy(newComponentDataNest[remap.To].Data, oldComponentData[remap.From].Data, oldComponentData[remap.From].Size);
+                }
+            }
+            else
+            {
+                //cNori note:
+                //this is slow way to do it there is faster way but lazy me works who cares (probably future cNori screw u for bad code in the past)
+
+                //straight up copy 1 to 1, - 1 component
+                int32 j = 0;
+                for (int32 i = 0; i < oldComponentData.Count(); i++)
+                {
+                    if (component->ID == i)
+                        continue;
+
+                    //wtf happen case just in case something will go horribly wrong
+                    if (newComponentDataNest[i].Size != oldComponentData[i].Size)
+                        return Result::BufferMismatch;
+
+                    Platform::MemoryCopy(newComponentDataNest[i].Data, oldComponentData[i].Data, oldComponentData[i].Size);
+                }
+            }
+            oldEntry.MarkRowDead(oldGeneration);
+            Platform::MemoryClear(oldDataBlock, oldDataSize);
+            entity.ID = entryID;
+            entity.Generation = entry.GetNextGeneration();
+            return Result::Ok;
         }
-
-        Result AddComponent(Entity& entity, IComponent component)
-        {
-            Entry& entry = Registry[entity.ID];
-            const uint32 rowIndex = entity.Generation - 1;
-            auto types = entry.Types;
-
-
-
-            
-
-
-        }
-
-
         void FindArchetypeMatch(const Entry::Archetypes& Archetypes, int32& OutEntryID, Array<Entry::IndexRemapper>& OutOrderRemap)
         {
             OutOrderRemap.Resize(Archetypes.Count(), false);
@@ -518,20 +795,14 @@ public:
             //done we are done this is end of func
             OutOrderRemap.Clear();
         }
-        
-
-
-
-        void GetEntityArchetypes()
-        {
-            //TODO: implement it
-        }
+        friend class EntityComponentSystem;
     };
 private:
     static Array<ComponentDescriptor> descriptors;
     static Dictionary<StringView, ComponentTypeId> Types;
 public:
-    static ComponentTypeId RegisterComponent(uint32 Size,uint32 Alignment,const StringView& TypeName, void (*Construct)(void* memory), void (*Destroy)(void* memory))
+    //internal and bindings use only
+    static ComponentTypeId RegisterComponent(uint32 Size, uint32 Alignment, const StringView& TypeName, void (*Construct)(void* memory), void (*Destroy)(void* memory))
     {
         auto it = Types.Find(TypeName);
         if (it.Index() == -1)
@@ -565,4 +836,34 @@ public:
             //return -1;
         }
     }
+public:
+    //Exposed Low level calls don't use it unless u know what are u doing
+    //also: API here is volatile can change at anytime between versions of the engine use High Level-API instead
+    static class LowLevelCalls
+    {
+        [[nodiscard]] FORCE_INLINE EntityComponentSystem::Registry::Result CreateEntity(Registry* reg, const EntityComponentSystem::Registry::Entry::Archetypes& Archetypes, Entity& OutEntity)
+        {
+            return reg->CreateEntity(Archetypes, OutEntity);
+        }
+        [[nodiscard]] FORCE_INLINE EntityComponentSystem::Registry::Result DestroyEntity(Registry* reg, Entity& OutEntity)
+        {
+            return reg->DestroyEntity(OutEntity);
+        }
+        [[nodiscard]] FORCE_INLINE bool HasComponentsOfType(Registry* reg, Entity& entity, ComponentDescriptor descriptor)
+        {
+            return reg->HasComponentsOfType(entity, descriptor);
+        }
+        [[nodiscard]] FORCE_INLINE EntityComponentSystem::Registry::Result GetComponentsOfType(Registry* reg, Entity& entity, ComponentDescriptor descriptor, Array<IComponent*>& components)
+        {
+            return reg->GetComponentsOfType(entity, descriptor, components);
+        }
+        [[nodiscard]] FORCE_INLINE EntityComponentSystem::Registry::Result AddComponentOfType(Registry* reg, Entity& entity, ComponentDescriptor descriptor, const IComponent* component)
+        {
+            return reg->AddComponentOfType(entity, descriptor, component);
+        }
+        [[nodiscard]] FORCE_INLINE EntityComponentSystem::Registry::Result DestroyComponentOfType(Registry* reg, Entity& entity, const IComponent* component)
+        {
+            return reg->DestroyComponentOfType(entity, component);
+        }
+    };
 };
