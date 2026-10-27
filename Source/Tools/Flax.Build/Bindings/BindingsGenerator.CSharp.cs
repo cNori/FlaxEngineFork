@@ -819,7 +819,7 @@ namespace Flax.Build.Bindings
 
                 // Out parameters that need additional converting will be converted at the native side (eg. object reference)
                 if (parameterInfo.IsOut && !string.IsNullOrEmpty(GenerateCSharpManagedToNativeConverter(buildData, parameterInfo.Type, caller)))
-                    nativeType = parameterInfo.Type.Type;
+                    nativeType = GenerateCSharpNativeToManaged(buildData, parameterInfo.Type, caller, true);
 
                 contents.Append(nativeType);
                 contents.Append(' ');
@@ -916,7 +916,7 @@ namespace Flax.Build.Bindings
                 else
                 {
                     if (parameterInfo.IsRef)
-                        throw new Exception($"Cannot use Ref meta on parameter {parameterInfo} in function {functionInfo.Name} in {caller}. Use API_PARAM(Out) if you want to pass it as a result reference.");
+                        Log.Fatal(caller.File, $"Cannot use Ref meta on parameter {parameterInfo} in function {functionInfo.Name} in {caller}. Use API_PARAM(Out) if you want to pass it as a result reference.");
 
                     // Convert value
                     contents.Append(string.Format(convertFunc, paramName));
