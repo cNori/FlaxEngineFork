@@ -6,6 +6,7 @@
 #include "Engine/Core/Types/String.h"
 #include "Engine/Core/Memory/Memory.h"
 #include <Engine/Scripting/ScriptingObjectReference.h>
+#include <Engine/Core/Types/Variant.h>
 
 
 #define DECLARE_COMPONENT(Type)                                                                                        \
@@ -17,7 +18,7 @@
     {                                                                                                                  \
         static_assert(std::is_default_constructible<Type>::value,"ECS component "#Type"must be default constructible");\
         static const uint32 id =                                                                                       \
-            EntityComponentSystem::RegisterComponent<Type>(                                                            \
+            EntityComponentSystem::RegisterComponent(                                                            \
             sizeof(Type),                                                                                              \
             alignof(Type),                                                                                             \
             GetTypeName(),                                                                                             \
@@ -28,21 +29,19 @@
     }                                                                                                                  \
 
 struct Entity;
-class IComponent;
+struct Component;
 
 /// <summary>
 /// ECS stuff
 /// </summary>
 API_CLASS(Static) class EntityComponentSystem
 {
-    DECLARE_SCRIPTING_TYPE_MINIMAL(IComponent)
+    DECLARE_SCRIPTING_TYPE_MINIMAL(EntityComponentSystem)
 public:
     class LowLevelCalls;
-
-
-    API_CLASS() class ComponentDescriptor 
+    API_CLASS() class ComponentDescriptor : public ScriptingObject
     {
-        DECLARE_SCRIPTING_TYPE_MINIMAL(ComponentDescriptor)
+        DECLARE_SCRIPTING_TYPE(ComponentDescriptor);
     public:
         String TypeName;
         uint32 TypeID;
@@ -53,9 +52,9 @@ public:
         // life cycle callbacks, stable UUID/name, etc.
     };
 
-    API_CLASS() class Registry
+    API_CLASS() class Registry : public ScriptingObject
     {
-        DECLARE_SCRIPTING_TYPE_MINIMAL(Registry)
+        DECLARE_SCRIPTING_TYPE(Registry);
     public:
         API_ENUM() enum Result
         {
@@ -76,7 +75,14 @@ public:
         struct Entry
         {
         public:
-            typedef Array<EntityComponentSystem::ComponentDescriptor> Archetypes;
+            //TODO:
+            //for this class
+            //1. FIX THE FUCKING BINDINGS GENERATOR
+            //it is some strate up bullshit it is ECS and component descryptors are ComponentDescriptor**
+            //lets jump araund in memory like some rabit becuse why not
+            //insted of having packed array of ComponentDescriptor (Archetypes) we have some strate up bullshit to get it to C#
+            //when this is done swap it back to paced array and const ComponentDescriptor&
+            typedef Array<EntityComponentSystem::ComponentDescriptor*> Archetypes;
         public:
             struct IndexRemapper
             {
@@ -208,23 +214,25 @@ public:
                 {
                     ComponentData component;
                     component.Data = static_cast<uint8*>(blockData) + offset;
-                    component.Size = Types[i].Size;
+                    component.Size = Types[i]->Size;
                     components.Add(component);
 
-                    offset += Types[i].Size;
+                    offset += Types[i]->Size;
                 }
             }
         };
-        Array<Entry> Registry;
+        Array<EntityComponentSystem::Registry::Entry> registry;
     private:
         EntityComponentSystem::Registry::Result CreateEntity(const Entry::Archetypes& Archetypes, Entity& OutEntity);
         EntityComponentSystem::Registry::Result DestroyEntity(Entity& entity);
-        bool HasComponentsOfType(Entity& entity, ComponentDescriptor descriptor);
-        EntityComponentSystem::Registry::Result GetComponentsOfType(Entity& entity, ComponentDescriptor descriptor, Array<IComponent*>& components);
-        EntityComponentSystem::Registry::Result AddComponentOfType(Entity& entity, ComponentDescriptor descriptor, const IComponent* component);
-        EntityComponentSystem::Registry::Result DestroyComponentOfType(Entity& entity, const IComponent* component);
+        bool HasComponentsOfType(Entity& entity, const ComponentDescriptor& descriptor);
+        EntityComponentSystem::Registry::Result GetComponentsOfType(Entity& entity, const ComponentDescriptor& descriptor, Array<Component*>& components);
+        EntityComponentSystem::Registry::Result AddComponentOfType(Entity& entity, const ComponentDescriptor& descriptor, const Component* component);
+        EntityComponentSystem::Registry::Result DestroyComponentOfType(Entity& entity, const Component* component);
         void FindArchetypeMatch(const Entry::Archetypes& Archetypes, int32& OutEntryID, Array<Entry::IndexRemapper>& OutOrderRemap);
         friend class EntityComponentSystem::LowLevelCalls;
+    public:
+        ~Registry() = default;
     };
 private:
     static Array<ComponentDescriptor> descriptors;
@@ -238,49 +246,67 @@ public:
     API_CLASS(Static) class LowLevelCalls
     {
         DECLARE_SCRIPTING_TYPE_MINIMAL(LowLevelCalls)
-
-        [[nodiscard]] FORCE_INLINE API_FUNCTION() static EntityComponentSystem::Registry::Result CreateEntity(ScriptingObjectReference<Registry> reg, const Array<EntityComponentSystem::ComponentDescriptor>& Archetypes, Entity& OutEntity)
+    public:
+        API_FUNCTION() static EntityComponentSystem::Registry::Result CreateEntity(EntityComponentSystem::Registry& reg, const Array<EntityComponentSystem::ComponentDescriptor*>& Archetypes, API_PARAM(Out) Entity& OutEntity)
         {
-            return reg->CreateEntity(Archetypes, OutEntity);
+            return reg.CreateEntity(Archetypes, OutEntity);
         }
-        //[[nodiscard]] FORCE_INLINE API_FUNCTION() static EntityComponentSystem::Registry::Result DestroyEntity(Registry* reg, Entity& OutEntity)
-        //{
-        //    return reg->DestroyEntity(OutEntity);
-        //}
-        //[[nodiscard]] FORCE_INLINE API_FUNCTION() static bool HasComponentsOfType(Registry* reg, Entity& entity, ComponentDescriptor descriptor)
-        //{
-        //    return reg->HasComponentsOfType(entity, descriptor);
-        //}
-        //[[nodiscard]] FORCE_INLINE API_FUNCTION() static EntityComponentSystem::Registry::Result GetComponentsOfType(Registry* reg, Entity& entity, ComponentDescriptor descriptor, Array<IComponent*>& components)
-        //{
-        //    return reg->GetComponentsOfType(entity, descriptor, components);
-        //}
-        //[[nodiscard]] FORCE_INLINE API_FUNCTION() static EntityComponentSystem::Registry::Result AddComponentOfType(Registry* reg, Entity& entity, ComponentDescriptor descriptor, const IComponent* component)
-        //{
-        //    return reg->AddComponentOfType(entity, descriptor, component);
-        //}
-        //[[nodiscard]] FORCE_INLINE API_FUNCTION() static EntityComponentSystem::Registry::Result DestroyComponentOfType(Registry* reg, Entity& entity, const IComponent* component)
-        //{
-        //    return reg->DestroyComponentOfType(entity, component);
-        //}
+        API_FUNCTION() static EntityComponentSystem::Registry::Result DestroyEntity(EntityComponentSystem::Registry& reg, API_PARAM(Ref) Entity& OutEntity)
+        {
+            return reg.DestroyEntity(OutEntity);
+        }
+        API_FUNCTION() static bool HasComponentsOfType(EntityComponentSystem::Registry& reg, API_PARAM(Ref) Entity& entity, EntityComponentSystem::ComponentDescriptor& descriptor)
+        {
+            return reg.HasComponentsOfType(entity, descriptor);
+        }
+        API_FUNCTION() static EntityComponentSystem::Registry::Result GetComponentsOfType(EntityComponentSystem::Registry& reg, API_PARAM(Ref) Entity& entity, EntityComponentSystem::ComponentDescriptor& descriptor,API_PARAM(Out) Array<Variant>& components);
+        API_FUNCTION() static EntityComponentSystem::Registry::Result AddComponentOfType(EntityComponentSystem::Registry& reg, API_PARAM(Ref) Entity& entity, EntityComponentSystem::ComponentDescriptor& descriptor, const Component* component)
+        {
+            return reg.AddComponentOfType(entity, descriptor, component);
+        }
+        API_FUNCTION() static EntityComponentSystem::Registry::Result DestroyComponentOfType(EntityComponentSystem::Registry& reg, API_PARAM(Ref) Entity& entity, const Component* component)
+        {
+            return reg.DestroyComponentOfType(entity, component);
+        }
+        API_FUNCTION() static EntityComponentSystem::Registry::Result GetComponentDescriptor(const StringView& componentTypeName, API_PARAM(Out) EntityComponentSystem::ComponentDescriptor*& OutComponentDescriptor);
     };
 };
 
+
+/*
+hit another limit API_INTERFACE generation
+so fields can be generated
+property's throw out of scope stuff lost the IComponent for who knows why or how
+API_FUNCTION() uint32 GetID() be overlooked by binding generator C++ glue exists C# nope
+plopping it as a struct not ideal for the base
+*/
+
+
 /// <summary>
-/// component interface
+/// base component
 /// </summary>
-API_INTERFACE() class IComponent
+API_STRUCT() struct FLAXENGINE_API Component
 {
-    DECLARE_SCRIPTING_TYPE_MINIMAL(IComponent)
-    //DECLARE_COMPONENT(IComponent)
+    DECLARE_SCRIPTING_TYPE_STRUCTURE(Component)
+    DECLARE_COMPONENT(Component)
 private:
     uint32 ID;
     uint32 Owner;
 private:
     friend EntityComponentSystem::Registry;
+public:
+    //Exposed Low level calls don't use it unless u know what are u doing
+    //also: API here is volatile can change at anytime between versions of the engine use High Level-API instead
+    API_PROPERTY() uint32 GetLowLevelID() { return ID; };
+    //Exposed Low level calls don't use it unless u know what are u doing
+    //also: API here is volatile can change at anytime between versions of the engine use High Level-API instead
+    API_PROPERTY() uint32 GetLowLevelOwner() { return Owner; };
 };
 
-API_STRUCT() struct Entity
+
+
+
+API_STRUCT() struct FLAXENGINE_API Entity
 {
     DECLARE_SCRIPTING_TYPE_MINIMAL(Entity)
 private:

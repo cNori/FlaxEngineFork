@@ -45,7 +45,19 @@ uint32 EntityComponentSystem::RegisterComponent(uint32 Size, uint32 Alignment, c
     }
 }
 
+EntityComponentSystem::ComponentDescriptor::ComponentDescriptor(const SpawnParams& params)
+    : ScriptingObject(params)
+{
+}
+
+
 #pragma region EntityComponentSystemRegistry
+
+EntityComponentSystem::Registry::Registry(const SpawnParams& params)
+    : ScriptingObject(params)
+{
+}
+
 EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::CreateEntity(const Entry::Archetypes& Archetypes, Entity& OutEntity)
 {
     // 1. Find matching Entry and input-to-entry order remap.
@@ -55,7 +67,7 @@ EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::CreateE
     if (EntryID == -1)
     {
         // 2. If absent, create and initialize an Entry.
-        const int32 entryIndex = Registry.Count();
+        const int32 entryIndex = registry.Count();
 
         Entry entry;
         Result result = entry.Init(Archetypes);
@@ -64,17 +76,17 @@ EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::CreateE
 
         OutEntity.Generation = entry.GetNextGeneration();
         OutEntity.ID = EntryID;
-        Registry.Add(MoveTemp(entry));
+        registry.Add(MoveTemp(entry));
     }
     else
     {
         // 2. If not absent, set the Generation and ID.
-        OutEntity.Generation = Registry[EntryID].GetNextGeneration();
+        OutEntity.Generation = registry[EntryID].GetNextGeneration();
         OutEntity.ID = EntryID;
     }
 
     // 3. Construct each component in the Entry for Entity.
-    Entry& entry = Registry[OutEntity.ID];
+    Entry& entry = registry[OutEntity.ID];
     auto result = entry.EnsureSlots(entry.ActiveRowCount + 1);
     if (result == Result::Ok)
         entry.ConstructComponents(OutEntity.Generation);
@@ -83,10 +95,10 @@ EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::CreateE
 
 EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::DestroyEntity(Entity& entity)
 {
-    if (Registry.IsValidIndex(entity.ID) || entity.Generation == MAX_uint32)
+    if (registry.IsValidIndex(entity.ID) || entity.Generation == MAX_uint32)
         return EntityComponentSystem::Registry::Result::InvalidEntity;
 
-    EntityComponentSystem::Registry::Entry& entry = Registry[entity.ID];
+    EntityComponentSystem::Registry::Entry& entry = registry[entity.ID];
     const uint32 rowIndex = entity.Generation;
 
     if (!entry.IsRowAlive(rowIndex))
@@ -100,13 +112,13 @@ EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::Destroy
     return EntityComponentSystem::Registry::Result::Ok;
 }
 
-bool EntityComponentSystem::Registry::HasComponentsOfType(Entity& entity, ComponentDescriptor descriptor)
+bool EntityComponentSystem::Registry::HasComponentsOfType(Entity& entity, const ComponentDescriptor& descriptor)
 {
-    Entry& entry = Registry[entity.ID];
+    Entry& entry = registry[entity.ID];
     //component type fetch
     for (int32 i = 0; i < entry.Types.Count(); i++)
     {
-        if (descriptor.TypeID == entry.Types[i].TypeID)
+        if (descriptor.TypeID == entry.Types[i]->TypeID)
         {
             return true;
         }
@@ -114,13 +126,14 @@ bool EntityComponentSystem::Registry::HasComponentsOfType(Entity& entity, Compon
     return false;
 }
 
-EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::GetComponentsOfType(Entity& entity, ComponentDescriptor descriptor, Array<IComponent*>& components)
+EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::GetComponentsOfType(
+    Entity& entity, const ComponentDescriptor& descriptor, Array<Component*>& components)
 {
     Array<Entry::ComponentData> ComponentData;
     void* dataBlock;
     uint32 dataSize;
     uint8* chunkBytes;
-    Entry& entry = Registry[entity.ID];
+    Entry& entry = registry[entity.ID];
     auto result = entry.GetComponentBlockInfo(entity.Generation, chunkBytes, dataBlock, dataSize);
     if (result != EntityComponentSystem::Registry::Result::Ok)
         return result;
@@ -128,26 +141,35 @@ EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::GetComp
     //component type fetch
     for (int32 i = 0; i < entry.Types.Count(); i++)
     {
-        if (descriptor.TypeID == entry.Types[i].TypeID)
+        if (descriptor.TypeID == entry.Types[i]->TypeID)
         {
-            components.Add((IComponent*)ComponentData[i].Data);
+            components.Add((Component*)ComponentData[i].Data);
         }
     }
     return EntityComponentSystem::Registry::Result::Ok;
 }
 
-inline EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::AddComponentOfType(Entity& entity, ComponentDescriptor descriptor, const IComponent* component)
+EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::AddComponentOfType(
+    Entity& entity, 
+    const ComponentDescriptor& descriptor, 
+    const Component* component
+)
 {
     //find new Archetype set
-    Entry::Archetypes ar = Registry[entity.ID].Types;
-    ar.Add(descriptor);
+    Entry::Archetypes ar = registry[entity.ID].Types;
+
+    //bushtit here in what worlds this needs to be done like this
+    //if something craps it self look at this it is unsafe copy
+    auto bshere = ar.AddOne();
+    (*bshere) = descriptor;
+
     int32 entryID;
     Array<Entry::IndexRemapper> orderRemap;
     FindArchetypeMatch(ar, entryID, orderRemap);
     if (entryID == -1)
     {
         // 1. If absent, create and initialize an Entry.
-        const int32 entryIndex = Registry.Count();
+        const int32 entryIndex = registry.Count();
 
         Entry e;
         Result result = e.Init(ar);
@@ -155,14 +177,14 @@ inline EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::
             return result;
 
         auto oldGeneration = entity.Generation;
-        Entry& oldEntry = Registry[entity.ID];
+        Entry& oldEntry = registry[entity.ID];
 
         entity.Generation = e.GetNextGeneration();
-        entity.ID = Registry.Count();
-        Registry.Add(MoveTemp(e));
+        entity.ID = registry.Count();
+        registry.Add(MoveTemp(e));
 
         // 2. Construct each component in the Entry for Entity.
-        Entry& entry = Registry[entity.ID];
+        Entry& entry = registry[entity.ID];
         result = entry.EnsureSlots(entry.ActiveRowCount + 1);
         if (result == Result::Ok)
         {
@@ -205,7 +227,7 @@ inline EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::
     {
         //1. Get current existing registry data
         Array<Entry::ComponentData> currentComponentData;
-        auto& curentEntry = Registry[entity.ID];
+        auto& curentEntry = registry[entity.ID];
         void* oldDataBlock;
         uint32 oldDataSize;
         uint8* oldChunkBytes;
@@ -216,7 +238,7 @@ inline EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::
 
         //2. Get existing registry data and remap entity to new entry
         Array<Entry::ComponentData> componentData;
-        auto& entry = Registry[entryID];
+        auto& entry = registry[entryID];
         void* dataBlock;
         uint32 dataSize;
         uint8* chunkBytes;
@@ -255,10 +277,10 @@ inline EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::
     return Result::Ok;
 }
 
-EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::DestroyComponentOfType(Entity& entity, const IComponent* component)
+EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::DestroyComponentOfType(Entity& entity, const Component* component)
 {
     //find new Archetype set
-    Entry::Archetypes ar = Registry[entity.ID].Types;
+    Entry::Archetypes ar = registry[entity.ID].Types;
     ar.RemoveAt(component->ID);
     int32 entryID;
     Array<Entry::IndexRemapper> orderRemap;
@@ -278,7 +300,7 @@ EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::Destroy
 
     //1. Get current existing data
     Array<Entry::ComponentData> oldComponentData;
-    auto& oldEntry = Registry[entity.ID];
+    auto& oldEntry = registry[entity.ID];
     auto oldGeneration = entity.Generation;
     void* oldDataBlock;
     uint32 oldDataSize;
@@ -294,10 +316,10 @@ EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::Destroy
         Result result = e.Init(ar);
         if (result != Result::Ok)
             return result;
-        Registry.Add(MoveTemp(e));
-        entryID = Registry.Count();
+        registry.Add(MoveTemp(e));
+        entryID = registry.Count();
     }
-    Entry& entry = Registry[entryID];
+    Entry& entry = registry[entryID];
     result = entry.EnsureSlots(entry.ActiveRowCount + 1);
     if (result != Result::Ok)
         return result;
@@ -357,9 +379,9 @@ void EntityComponentSystem::Registry::FindArchetypeMatch(const Entry::Archetypes
     int32 hitCount = 0;
 
     //scan Registry for Archetypes
-    for (int32 i = 0; i < Registry.Count(); i++)
+    for (int32 i = 0; i < registry.Count(); i++)
     {
-        const auto& rtypes = Registry[i].Types;
+        const auto& rtypes = registry[i].Types;
         if (rtypes.Count() != Archetypes.Count())
             continue;
 
@@ -369,11 +391,11 @@ void EntityComponentSystem::Registry::FindArchetypeMatch(const Entry::Archetypes
             for (int32 k = 0; k < Archetypes.Count(); k++)
             {
                 //primary filter
-                if (Archetypes[k].Size == rtypes[j].Size &&
-                    Archetypes[k].Alignment == rtypes[j].Alignment)
+                if (Archetypes[k]->Size == rtypes[j]->Size &&
+                    Archetypes[k]->Alignment == rtypes[j]->Alignment)
                 {
                     //deep filter
-                    if (Archetypes[k].TypeName == rtypes[j].TypeName)
+                    if (Archetypes[k]->TypeName == rtypes[j]->TypeName)
                     {
                         //duplicate check
 
@@ -421,7 +443,7 @@ EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::Entry::
     uint32 size = 0;
     for (int32 i = 0; i < Types.Count(); i++)
     {
-        size += Types[i].Size;
+        size += Types[i]->Size;
     }
     if (size > MaxRowStrideSize)
         return Result::ArchetypeGroupToBig;
@@ -562,8 +584,8 @@ void EntityComponentSystem::Registry::Entry::ConstructComponents(uint32 rowIndex
     for (int32 i = 0; i < Types.Count(); i++)
     {
         const auto& type = Types[i];
-        type.Construct(row + offset);
-        offset += type.Size;
+        type->Construct(row + offset);
+        offset += type->Size;
     }
 }
 
@@ -577,8 +599,38 @@ void EntityComponentSystem::Registry::Entry::DestroyComponents(uint32 rowIndex)
     for (int32 i = 0; i < Types.Count(); i++)
     {
         const auto& type = Types[i];
-        type.Destroy(row + offset);
-        offset += type.Size;
+        type->Destroy(row + offset);
+        offset += type->Size;
     }
 }
 #pragma endregion
+
+EntityComponentSystem::Registry::Result EntityComponentSystem::LowLevelCalls::GetComponentsOfType(EntityComponentSystem::Registry& reg, Entity& entity, EntityComponentSystem::ComponentDescriptor& descriptor, API_PARAM(Out)Array<Variant>& components)
+{
+    Array<Component*> ptrdata;
+    ptrdata.Resize(components.Count(), false);
+
+    for (size_t i = 0; i < components.Count(); i++)
+    {
+        if (components[i].Type == VariantType::Structure &&
+            components[i].Type == Component::TypeInitializer)
+        {
+            ptrdata[i] = (Component*)components[i].AsBlob.Data;
+        }
+        else
+        {
+            ptrdata[i] = nullptr;
+        }
+    }
+    return reg.GetComponentsOfType(entity, descriptor, ptrdata);
+}
+
+EntityComponentSystem::Registry::Result EntityComponentSystem::LowLevelCalls::GetComponentDescriptor(const StringView& componentTypeName,EntityComponentSystem::ComponentDescriptor*& OutComponentDescriptor)
+{
+    if (uint32* index = EntityComponentSystem::Types.TryGet(componentTypeName))
+    {
+        OutComponentDescriptor = &descriptors[*index];
+        return EntityComponentSystem::Registry::Result::Ok;
+    }
+    return EntityComponentSystem::Registry::Result::NotFound;
+}
