@@ -189,7 +189,7 @@ bool GPUTextureDX12::OnInit()
     if (isWrite)
     {
         _device->Locker.Lock();
-        if (IsInMainThread() && _device->IsRendering() && _device->GetMainContextDX12()->IsOpen)
+        if (IsInRenderThread() && _device->IsRendering() && _device->GetMainContextDX12()->IsOpen)
             _device->GetMainContextDX12()->GetCommandList()->DiscardResource(_resource, nullptr);
         else
             _device->PendingResourceDiscards.Add(_resource);
@@ -335,7 +335,7 @@ void GPUTextureDX12::initHandles()
         {
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
             uavDesc.Texture2DArray.MipSlice = 0;
-            uavDesc.Texture2DArray.ArraySize = arraySize * 6;
+            uavDesc.Texture2DArray.ArraySize = arraySize; // ArraySize() counts the slices (for a cube map, its 6 faces)
             uavDesc.Texture2DArray.FirstArraySlice = 0;
             uavDesc.Texture2DArray.PlaneSlice = 0;
         }
@@ -470,7 +470,7 @@ void GPUTextureDX12::initHandles()
                 uavDesc.Texture2DArray.FirstArraySlice = arrayIndex;
                 uavDesc.Texture2DArray.MipSlice = 0;
                 uavDesc.Texture2DArray.PlaneSlice = 0;
-                _handlesPerSlice[arrayIndex].SetSRV(srDesc);
+                _handlesPerSlice[arrayIndex].SetUAV(uavDesc);
             }
         }
 
