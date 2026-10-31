@@ -45,12 +45,6 @@ uint32 EntityComponentSystem::RegisterComponent(uint32 Size, uint32 Alignment, c
     }
 }
 
-EntityComponentSystem::ComponentDescriptor::ComponentDescriptor(const SpawnParams& params)
-    : ScriptingObject(params)
-{
-}
-
-
 #pragma region EntityComponentSystemRegistry
 
 EntityComponentSystem::Registry::Registry(const SpawnParams& params)
@@ -58,7 +52,8 @@ EntityComponentSystem::Registry::Registry(const SpawnParams& params)
 {
 }
 
-EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::CreateEntity(const Entry::Archetypes& Archetypes, Entity& OutEntity)
+EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::CreateEntity(
+    const Entry::Archetypes& Archetypes, Entity& OutEntity)
 {
     // 1. Find matching Entry and input-to-entry order remap.
     Array<Entry::IndexRemapper> Map = {};
@@ -118,7 +113,7 @@ bool EntityComponentSystem::Registry::HasComponentsOfType(Entity& entity, const 
     //component type fetch
     for (int32 i = 0; i < entry.Types.Count(); i++)
     {
-        if (descriptor.TypeID == entry.Types[i]->TypeID)
+        if (descriptor.TypeID == entry.Types[i].TypeID)
         {
             return true;
         }
@@ -141,7 +136,7 @@ EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::GetComp
     //component type fetch
     for (int32 i = 0; i < entry.Types.Count(); i++)
     {
-        if (descriptor.TypeID == entry.Types[i]->TypeID)
+        if (descriptor.TypeID == entry.Types[i].TypeID)
         {
             components.Add((Component*)ComponentData[i].Data);
         }
@@ -157,11 +152,7 @@ EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::AddComp
 {
     //find new Archetype set
     Entry::Archetypes ar = registry[entity.ID].Types;
-
-    //bushtit here in what worlds this needs to be done like this
-    //if something craps it self look at this it is unsafe copy
-    auto bshere = ar.AddOne();
-    (*bshere) = descriptor;
+    ar.Add(descriptor);
 
     int32 entryID;
     Array<Entry::IndexRemapper> orderRemap;
@@ -371,7 +362,10 @@ EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::Destroy
     entity.Generation = entry.GetNextGeneration();
     return Result::Ok;
 }
-void EntityComponentSystem::Registry::FindArchetypeMatch(const Entry::Archetypes& Archetypes, int32& OutEntryID, Array<Entry::IndexRemapper>& OutOrderRemap)
+void EntityComponentSystem::Registry::FindArchetypeMatch(
+    const Entry::Archetypes& Archetypes,
+    int32& OutEntryID,
+    Array<Entry::IndexRemapper>& OutOrderRemap)
 {
     OutOrderRemap.Resize(Archetypes.Count(), false);
     OutEntryID = -1;
@@ -391,11 +385,11 @@ void EntityComponentSystem::Registry::FindArchetypeMatch(const Entry::Archetypes
             for (int32 k = 0; k < Archetypes.Count(); k++)
             {
                 //primary filter
-                if (Archetypes[k]->Size == rtypes[j]->Size &&
-                    Archetypes[k]->Alignment == rtypes[j]->Alignment)
+                if (Archetypes[k].Size == rtypes[j].Size &&
+                    Archetypes[k].Alignment == rtypes[j].Alignment)
                 {
                     //deep filter
-                    if (Archetypes[k]->TypeName == rtypes[j]->TypeName)
+                    if (Archetypes[k].TypeName == rtypes[j].TypeName)
                     {
                         //duplicate check
 
@@ -443,7 +437,7 @@ EntityComponentSystem::Registry::Result EntityComponentSystem::Registry::Entry::
     uint32 size = 0;
     for (int32 i = 0; i < Types.Count(); i++)
     {
-        size += Types[i]->Size;
+        size += Types[i].Size;
     }
     if (size > MaxRowStrideSize)
         return Result::ArchetypeGroupToBig;
@@ -584,8 +578,8 @@ void EntityComponentSystem::Registry::Entry::ConstructComponents(uint32 rowIndex
     for (int32 i = 0; i < Types.Count(); i++)
     {
         const auto& type = Types[i];
-        type->Construct(row + offset);
-        offset += type->Size;
+        type.Construct(row + offset);
+        offset += type.Size;
     }
 }
 
@@ -599,38 +593,90 @@ void EntityComponentSystem::Registry::Entry::DestroyComponents(uint32 rowIndex)
     for (int32 i = 0; i < Types.Count(); i++)
     {
         const auto& type = Types[i];
-        type->Destroy(row + offset);
-        offset += type->Size;
+        type.Destroy(row + offset);
+        offset += type.Size;
     }
 }
 #pragma endregion
 
-EntityComponentSystem::Registry::Result EntityComponentSystem::LowLevelCalls::GetComponentsOfType(EntityComponentSystem::Registry& reg, Entity& entity, EntityComponentSystem::ComponentDescriptor& descriptor, API_PARAM(Out)Array<Variant>& components)
+EntityComponentSystem::Registry::Result EntityComponentSystem::LowLevelCalls::GetComponentsOfType(
+    EntityComponentSystem::Registry& reg,
+    Entity& entity,
+    void* descriptor,
+    Array<void*>& components)
 {
     Array<Component*> ptrdata;
     ptrdata.Resize(components.Count(), false);
-
-    for (size_t i = 0; i < components.Count(); i++)
+    for (int32 i = 0; i < components.Count(); i++)
     {
-        if (components[i].Type == VariantType::Structure &&
-            components[i].Type == Component::TypeInitializer)
-        {
-            ptrdata[i] = (Component*)components[i].AsBlob.Data;
-        }
-        else
-        {
-            ptrdata[i] = nullptr;
-        }
+        ptrdata[i] = (Component*)components[i];
     }
-    return reg.GetComponentsOfType(entity, descriptor, ptrdata);
+    return reg.GetComponentsOfType(entity, *(EntityComponentSystem::ComponentDescriptor*)descriptor, ptrdata);
 }
 
-EntityComponentSystem::Registry::Result EntityComponentSystem::LowLevelCalls::GetComponentDescriptor(const StringView& componentTypeName,EntityComponentSystem::ComponentDescriptor*& OutComponentDescriptor)
+//EntityComponentSystem::Registry::Result EntityComponentSystem::LowLevelCalls::GetComponentDescriptor(const StringView& componentTypeName,void*& OutComponentDescriptor)
+//{
+//    if (uint32* index = EntityComponentSystem::Types.TryGet(componentTypeName))
+//    {
+//        //this is unsafe af binding bs
+//        OutComponentDescriptor = &descriptors[*index];
+//        return EntityComponentSystem::Registry::Result::Ok;
+//    }
+//    OutComponentDescriptor = nullptr;
+//    return EntityComponentSystem::Registry::Result::NotFound;
+//}
+
+EntityComponentSystem::Registry::Result
+EntityComponentSystem::LowLevelCalls::CreateEntity
+(
+    EntityComponentSystem::Registry& reg,
+    const Array<void*>& Archetypes,
+    Entity& OutEntity)
 {
-    if (uint32* index = EntityComponentSystem::Types.TryGet(componentTypeName))
+    Array<ComponentDescriptor> ptrdata;
+    ptrdata.Resize(Archetypes.Count(), false);
+    for (int32 i = 0; i < Archetypes.Count(); i++)
     {
-        OutComponentDescriptor = &descriptors[*index];
-        return EntityComponentSystem::Registry::Result::Ok;
+        ptrdata[i] = *(ComponentDescriptor*)Archetypes[i];
     }
-    return EntityComponentSystem::Registry::Result::NotFound;
+    return reg.CreateEntity(ptrdata, OutEntity);
+}
+EntityComponentSystem::Registry::Result
+EntityComponentSystem::LowLevelCalls::DestroyEntity
+(
+    EntityComponentSystem::Registry& reg,
+    Entity& OutEntity
+)
+{
+    return reg.DestroyEntity(OutEntity);
+}
+bool
+EntityComponentSystem::LowLevelCalls::HasComponentsOfType
+(
+    EntityComponentSystem::Registry& reg,
+    API_PARAM(Ref)Entity& entity,
+    void* descriptor
+)
+{
+    //if crashes here u don't know what are u doing descriptor must be not null and the ComponentDescriptor* not garbage
+    return reg.HasComponentsOfType(entity, *(EntityComponentSystem::ComponentDescriptor*)descriptor);
+}
+EntityComponentSystem::Registry::Result
+EntityComponentSystem::LowLevelCalls::AddComponentOfType
+(
+    EntityComponentSystem::Registry& reg,
+    API_PARAM(Ref)Entity& entity,
+    void* descriptor,
+    void* component)
+{
+    //if crashes here u don't know what are u doing descriptor must be not null and the ComponentDescriptor* not garbage
+    return reg.AddComponentOfType(entity, *(EntityComponentSystem::ComponentDescriptor*)descriptor, (Component*) component);
+}
+EntityComponentSystem::Registry::Result
+EntityComponentSystem::LowLevelCalls::DestroyComponentOfType(
+    EntityComponentSystem::Registry& reg,
+    Entity& entity,
+    void* component)
+{
+    return reg.DestroyComponentOfType(entity, (Component*)component);
 }
