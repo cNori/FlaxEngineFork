@@ -17,7 +17,7 @@
 /// </summary>
 API_CLASS(NoSpawn, Attributes="HideInEditor") class FLAXENGINE_API GPUAdapter : public ScriptingObject
 {
-    DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUDevice);
+    DECLARE_SCRIPTING_TYPE_NO_SPAWN(GPUAdapter);
 public:
     GPUAdapter()
         : ScriptingObject(SpawnParams(Guid::New(), TypeInitializer))

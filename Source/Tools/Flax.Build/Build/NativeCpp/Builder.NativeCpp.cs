@@ -516,6 +516,8 @@ namespace Flax.Build
                         {
                             // Compile C++ file with bindings
                             cppFiles.Add(bindings.GeneratedCppFilePath);
+                            if (bindings.AdditionalCppFiles != null)
+                                cppFiles.AddRange(bindings.AdditionalCppFiles);
                         }
                     }
 

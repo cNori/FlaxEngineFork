@@ -58,4 +58,6 @@
 #define API_TYPEDEF(...)
 #define API_INJECT_CODE(...)
 #define API_AUTO_SERIALIZATION(...) public: bool ShouldSerialize(const void* otherObj) const override; void Serialize(SerializeStream& stream, const void* otherObj) override; void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;
-#define DECLARE_SCRIPTING_TYPE_MINIMAL(type) public: friend class type##Internal; static struct ScriptingTypeInitializer TypeInitializer;
+// V2 access is granted per native type, independently of the legacy wrapper.
+template<typename T> struct VETBindingAccess;
+#define DECLARE_SCRIPTING_TYPE_MINIMAL(type) public: friend class type##Internal; friend struct ::VETBindingAccess<type>; static struct ScriptingTypeInitializer TypeInitializer;

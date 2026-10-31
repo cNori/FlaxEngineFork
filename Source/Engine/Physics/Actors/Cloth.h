@@ -195,7 +195,7 @@ API_CLASS(Attributes="ActorContextMenu(\"New/Physics/Cloth\"), ActorToolbox(\"Ph
     /// </summary>
     API_STRUCT() struct FabricSettings : ISerializable
     {
-        DECLARE_SCRIPTING_TYPE_MINIMAL(FabricStiffnessSettings);
+        DECLARE_SCRIPTING_TYPE_MINIMAL(FabricSettings);
         API_AUTO_SERIALIZATION();
 
         /// <summary>

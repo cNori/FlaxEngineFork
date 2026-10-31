@@ -447,6 +447,7 @@ namespace Flax.Build
                                     sourceFiles.AddRange(modulesBuildOptions[module].SourceFiles.Where(x => x.EndsWith(".cs")));
                                 }
                                 sourceFiles.RemoveAll(x => x.EndsWith(BuildFilesPostfix));
+                                sourceFiles = sourceFiles.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                                 foreach (var target in targets)
                                 {
                                     foreach (var configurationData in mainProject.Configurations)
@@ -461,6 +462,27 @@ namespace Flax.Build
                                             // Generated C# bindings source files (per-target, per-platform, per-configuration)
                                             var intermediateFolder = Path.Combine(q.Value.WorkingDirectory, Configuration.IntermediateFolder, target.Name, configurationData.PlatformName, configurationData.ArchitectureName, configurationData.ConfigurationName);
                                             var path = Path.Combine(intermediateFolder, q.Key.Name, q.Key.Name + ".Bindings.Gen.cs");
+                                            if (string.Equals(Configuration.BindingsGenerator, "V2", StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                var manifest = Path.Combine(intermediateFolder, q.Key.Name, q.Key.Name + ".BindingsV2.ManagedFiles");
+                                                if (File.Exists(manifest))
+                                                {
+                                                    generatedSourceFiles.AddRange(File.ReadAllLines(manifest).Where(File.Exists));
+                                                    continue;
+                                                }
+                                                // Bootstrap caches generated before the active-file manifest existed.
+                                                var response = Path.Combine(intermediateFolder, binaryModuleName + ".CSharp.response");
+                                                if (File.Exists(response))
+                                                {
+                                                    var modulePrefix = Path.GetFullPath(Path.Combine(intermediateFolder, q.Key.Name, "BindingsV2")) + Path.DirectorySeparatorChar;
+                                                    var sharedPrefix = Path.GetFullPath(Path.Combine(intermediateFolder, "BindingsV2Shared", binaryModuleName)) + Path.DirectorySeparatorChar;
+                                                    var active = File.ReadAllLines(response).Select(x => x.Trim().Trim('"').Replace('/', Path.DirectorySeparatorChar))
+                                                        .Where(x => x.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) &&
+                                                            (x.StartsWith(modulePrefix, StringComparison.OrdinalIgnoreCase) || x.StartsWith(sharedPrefix, StringComparison.OrdinalIgnoreCase)))
+                                                        .Where(File.Exists).ToArray();
+                                                    if (active.Length != 0) { generatedSourceFiles.AddRange(active); continue; }
+                                                }
+                                            }
                                             if (!File.Exists(path))
                                             {
                                                 Directory.CreateDirectory(Path.GetDirectoryName(path));
@@ -502,7 +524,7 @@ namespace Flax.Build
                                     project.Path = Path.Combine(projectsRoot, project.Name + '.' + dotNetProjectGenerator.ProjectFileExtension);
                                 }
                                 project.SourceFiles = sourceFiles;
-                                project.GeneratedSourceFiles = generatedSourceFiles;
+                                project.GeneratedSourceFiles = generatedSourceFiles.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                                 project.CSharp.UseFlaxVS = true;
                                 project.Configurations.AddRange(mainProject.Configurations);
                                 projectToBinaryModule.Add(project, binaryModule);

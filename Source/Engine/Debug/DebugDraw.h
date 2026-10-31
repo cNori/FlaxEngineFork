@@ -82,7 +82,7 @@ API_CLASS(Static) class FLAXENGINE_API DebugDraw
     static BoundingFrustum GetViewFrustum();
 
     // Sets the rendering view information beforehand.
-    API_FUNCTION() static void SetView(API_PARAM(ref) const RenderView& view);
+    API_FUNCTION() static void SetView(const RenderView& view);
 
     /// <summary>
     /// Draws the collected debug shapes to the output.

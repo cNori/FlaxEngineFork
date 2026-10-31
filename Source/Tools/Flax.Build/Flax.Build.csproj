@@ -34,6 +34,9 @@
     <Compile Include="..\..\Platforms\PS4\Flax.Build\*.cs" />
     <Compile Include="..\..\Platforms\PS5\Flax.Build\*.cs" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Flax.Bindings/Flax.Bindings.csproj" />
+  </ItemGroup>
 
   <ItemGroup>
     <Reference Include="Ionic.Zip.Reduced">

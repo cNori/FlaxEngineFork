@@ -61,6 +61,9 @@ namespace Flax.Deploy
                     var buildToolDll = "Flax.Build.dll";
                     DeployFile(src, dst, buildToolDll);
                     CodeSign(Path.Combine(dst, buildToolDll));
+                    DeployFile(src, dst, "Flax.Bindings.dll");
+                    CodeSign(Path.Combine(dst, "Flax.Bindings.dll"));
+                    DeployFile(src, dst, "Flax.Bindings.pdb", true);
                     DeployFile(src, dst, "Flax.Build.xml", true);
                     DeployFile(src, dst, "Flax.Build.pdb");
                     DeployFile(src, dst, "Flax.Build.deps.json");

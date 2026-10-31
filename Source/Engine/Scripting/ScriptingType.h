@@ -379,6 +379,7 @@ struct ScriptingObjectSpawnParams
 #define DECLARE_SCRIPTING_TYPE_STRUCTURE(type) \
     public: \
     friend class type##Internal; \
+    friend struct ::VETBindingAccess<type>; \
     static ScriptingTypeInitializer TypeInitializer; \
     FORCE_INLINE static const ScriptingType& GetStaticType() { return TypeInitializer.GetType(); } \
     FORCE_INLINE static MClass* GetStaticClass() { return TypeInitializer.GetType().ManagedClass; }
@@ -389,6 +390,7 @@ struct ScriptingObjectSpawnParams
 #define DECLARE_SCRIPTING_TYPE_NO_SPAWN(type) \
     public: \
     friend class type##Internal; \
+    friend struct ::VETBindingAccess<type>; \
     static ScriptingTypeInitializer TypeInitializer; \
     FORCE_INLINE static const ScriptingType& GetStaticType() { return TypeInitializer.GetType(); } \
     FORCE_INLINE static MClass* GetStaticClass() { return TypeInitializer.GetType().ManagedClass; }

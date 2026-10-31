@@ -86,7 +86,7 @@ public:
     /// </summary>
     API_STRUCT() struct VideoOutput
     {
-        DECLARE_SCRIPTING_TYPE_NO_SPAWN(VideoOutputMode);
+        DECLARE_SCRIPTING_TYPE_NO_SPAWN(VideoOutput);
 
         /// <summary>
         /// The display name.

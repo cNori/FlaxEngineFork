@@ -177,6 +177,10 @@ namespace Flax.Build
         [CommandLine("BuildBindingsOnly", "If set, forces targets to build only bindings (C# binaries-only).")]
         public static bool BuildBindingsOnly = false;
 
+        /// <summary>Selects the managed/native-call binding generator.</summary>
+        [CommandLine("bindingsGenerator", "V2/Legacy", "Selects binding call generation. V2 is the default; native scripting registration is retained.")]
+        public static string BindingsGenerator = "V2";
+
         /// <summary>
         /// Generates Visual Studio 2015 project format files. Valid only with -genproject option.
         /// </summary>
@@ -256,6 +260,10 @@ namespace Flax.Build
 
         internal static void PassArgs(ref string cmdLine)
         {
+            if (!string.Equals(BindingsGenerator, "V2", System.StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(BindingsGenerator, "Legacy", System.StringComparison.OrdinalIgnoreCase))
+                throw new System.ArgumentException("Unknown bindingsGenerator value. Expected V2 or Legacy.");
+            cmdLine += " -bindingsGenerator=" + BindingsGenerator;
             if (!string.IsNullOrEmpty(Compiler))
                 cmdLine += " -compiler=" + Compiler;
             if (!string.IsNullOrEmpty(Dotnet))

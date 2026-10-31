@@ -288,7 +288,7 @@ public:
 API_CLASS() class Class : public ScriptingObject
 {
     DECLARE_SCRIPTING_TYPE(Class);
-    API_FUNCTION() static void func(const Array<Class>& a);   // not fine
+    API_FUNCTION() static void func(const Array<Class>& a);
     API_FUNCTION() static void func1(const Array<Class*>& a); //fine
 };
 

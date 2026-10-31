@@ -259,6 +259,13 @@ namespace Flax.Build.Projects.VisualStudio
 
                 (string target, string platform, string arch, string configuration) GetGroupingFromPath(string path)
                 {
+                    // V2 sources live below an additional BindingsV2 directory;
+                    // shared snapshots also have an assembly directory. Locate the
+                    // target segment instead of counting backwards from the file.
+                    var parts = path.Replace('\\', '/').Split('/');
+                    int targetIndex = Array.FindLastIndex(parts, part => project.Targets.Any(t => t.Name == part));
+                    if (targetIndex >= 0 && targetIndex + 3 < parts.Length)
+                        return (parts[targetIndex], parts[targetIndex + 1], parts[targetIndex + 2], parts[targetIndex + 3]);
                     ReadOnlySpan<char> span = path.AsSpan();
                     Span<Range> split = stackalloc Range[path.Count((c) => c == '/' || c == '\\')];
                     var _ = MemoryExtensions.SplitAny(path, split, [ '/', '\\' ]);

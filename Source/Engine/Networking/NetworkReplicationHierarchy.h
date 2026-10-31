@@ -16,7 +16,7 @@ class Actor;
 /// </summary>
 API_STRUCT(NoDefault, Namespace="FlaxEngine.Networking") struct FLAXENGINE_API NetworkReplicationHierarchyObject
 {
-    DECLARE_SCRIPTING_TYPE_MINIMAL(NetworkReplicationObjectInfo);
+    DECLARE_SCRIPTING_TYPE_MINIMAL(NetworkReplicationHierarchyObject);
 
     // The object to replicate.
     API_FIELD() ScriptingObjectReference<ScriptingObject> Object;

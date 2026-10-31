@@ -148,6 +148,8 @@ namespace Flax.Build
 
         private static void BuildDotNet(TaskGraph graph, BuildData buildData, BuildOptions buildOptions, string name, List<string> sourceFiles, HashSet<string> fileReferences = null, IGrouping<string, Module> binaryModule = null, bool? optimizeAssembly = null)
         {
+            // V2 value declarations are shared by modules in the same assembly.
+            sourceFiles = sourceFiles.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             //don't try to compile stuff with FatalError
             //FatalError it is saying the binding generation has failed on C++ has API miss use or
             //compilation error / bad generation code

@@ -8,6 +8,11 @@
 
 #include "Engine/Core/Memory/Allocation.h"
 #include "Engine/Core/Collections/HashFunctions.h"
+// Keep the opt-in external subscription implementation out of this hot header.
+namespace DelegateBindings {
+    FLAXENGINE_API void Retire(void* source) noexcept;
+    FLAXENGINE_API bool ShouldCopy(const void* source, const void* callee) noexcept;
+}
 #if !DELEGATE_USE_ATOMIC
 #include "Engine/Threading/Threading.h"
 #include "Engine/Core/Collections/HashSet.h"
@@ -355,6 +360,7 @@ public:
         for (intptr i = 0; i < newSize; i++)
         {
             FunctionType& f = newBindings[i];
+            if (!DelegateBindings::ShouldCopy(&other, f._callee)) { f._callee = nullptr; f._function = nullptr; f._lambda = nullptr; continue; }
             if (f._function && f._lambda)
                 f.LambdaCtor();
         }
@@ -366,12 +372,13 @@ public:
             return;
         ScopeLock lock(otherData->Locker);
         for (auto i = otherData->Functions.Begin(); i.IsNotEnd(); ++i)
-            Bind(i->Item);
+            if (DelegateBindings::ShouldCopy(&other, i->Item._callee)) Bind(i->Item);
 #endif
     }
 
     Delegate(Delegate&& other) noexcept
     {
+        DelegateBindings::Retire(&other);
 #if DELEGATE_USE_ATOMIC
         _ptr = other._ptr;
         _size = other._size;
@@ -385,6 +392,7 @@ public:
 
     ~Delegate()
     {
+        DelegateBindings::Retire(this);
 #if DELEGATE_USE_ATOMIC
         auto ptr = (FunctionType*)_ptr;
         if (ptr)
@@ -411,19 +419,20 @@ public:
     {
         if (this != &other)
         {
+            DelegateBindings::Retire(this);
             UnbindAll();
 #if DELEGATE_USE_ATOMIC
             const intptr size = Platform::AtomicRead((intptr volatile*)&other._size);
             FunctionType* bindings = (FunctionType*)Platform::AtomicRead((intptr volatile*)&other._ptr);
             for (intptr i = 0; i < size; i++)
-                Bind(bindings[i]);
+                if (DelegateBindings::ShouldCopy(&other, bindings[i]._callee)) Bind(bindings[i]);
 #else
             Data* otherData = (Data*)Platform::AtomicRead(&_data);
             if (otherData != nullptr)
             {
                 ScopeLock lock(otherData->Locker);
                 for (auto i = otherData->Functions.Begin(); i.IsNotEnd(); ++i)
-                    Bind(i->Item);
+                    if (DelegateBindings::ShouldCopy(&other, i->Item._callee)) Bind(i->Item);
             }
 #endif
         }
@@ -434,6 +443,9 @@ public:
     {
         if (this != &other)
         {
+            DelegateBindings::Retire(this);
+            DelegateBindings::Retire(&other);
+            Delegate previous(MoveTemp(*this));
 #if DELEGATE_USE_ATOMIC
             _ptr = other._ptr;
             _size = other._size;
@@ -709,6 +721,7 @@ public:
     /// </summary>
     void UnbindAll()
     {
+        DelegateBindings::Retire(this);
 #if DELEGATE_USE_ATOMIC
         const intptr size = Platform::AtomicRead(&_size);
         FunctionType* bindings = (FunctionType*)Platform::AtomicRead(&_ptr);
@@ -812,15 +825,17 @@ public:
     int32 GetBindings(FunctionType* buffer, int32 bufferSize) const
     {
         int32 count = 0;
+        if (!buffer || bufferSize <= 0) return 0;
 #if DELEGATE_USE_ATOMIC
         const intptr size = Platform::AtomicRead((intptr volatile*)&_size);
         FunctionType* bindings = (FunctionType*)Platform::AtomicRead((intptr volatile*)&_ptr);
-        for (intptr i = 0; i < size && i < bufferSize; i++)
+        for (intptr i = 0; i < size && count < bufferSize; i++)
         {
             buffer[count]._function = (StubSignature)Platform::AtomicRead((intptr volatile*)&bindings[i]._function);
             if (buffer[count]._function != nullptr)
             {
                 buffer[count]._callee = (void*)Platform::AtomicRead((intptr volatile*)&bindings[i]._callee);
+                if (!DelegateBindings::ShouldCopy(this, buffer[count]._callee)) { buffer[count]._function = nullptr; buffer[count]._callee = nullptr; continue; }
                 buffer[count]._lambda = (typename FunctionType::Lambda*)Platform::AtomicRead((intptr volatile*)&bindings[i]._lambda);
                 if (buffer[count]._lambda)
                     buffer[count].LambdaCtor();
@@ -832,8 +847,9 @@ public:
         if (data)
         {
             ScopeLock lock(data->Locker);
-            for (auto i = data->Functions.Begin(); i.IsNotEnd(); ++i)
+            for (auto i = data->Functions.Begin(); i.IsNotEnd() && count < bufferSize; ++i)
             {
+                if (!DelegateBindings::ShouldCopy(this, i->Item._callee)) continue;
                 new(buffer + count) FunctionType((const FunctionType&)i->Item);
                 count++;
             }

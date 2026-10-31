@@ -36,6 +36,7 @@ namespace Flax.Build.Bindings
             /// The generated C# file path that contains a API bindings wrapper code to setup the glue code.
             /// </summary>
             public string GeneratedCSharpFilePath;
+            public List<string> AdditionalCppFiles;
 
             /// <summary>
             /// The custom data per-scripting language.
@@ -663,6 +664,23 @@ namespace Flax.Build.Bindings
                 GeneratedCSharpFilePath = Path.Combine(moduleOptions.IntermediateFolder, module.Name + ".Bindings.Gen.cs"),
             };
 
+            string backendStamp = Path.Combine(moduleOptions.IntermediateFolder, module.Name + ".BindingsBackend");
+            string backend = UseV2Generator && module.BuildCSharp && module.BuildNativeCode &&
+                EngineConfiguration.WithCSharp(buildData.TargetOptions) ? "V2" : "Legacy";
+            // A legacy parse-cache hit does not prove that the managed output was
+            // produced by the currently selected backend.
+            if (!System.IO.File.Exists(backendStamp) || System.IO.File.ReadAllText(backendStamp) != backend)
+                moduleInfo.IsFromCache = false;
+
+            if (UseV2Generator && module.BuildCSharp && module.BuildNativeCode && EngineConfiguration.WithCSharp(buildData.TargetOptions) &&
+                (bindings.UseBindings || HasV2Exports(moduleOptions)))
+            {
+                bindings.UseBindings = true;
+                GenerateV2Bindings(buildData, module, moduleInfo, ref moduleOptions, ref bindings);
+                Utilities.WriteFileIfChanged(backendStamp, backend);
+                return;
+            }
+
             if (bindings.UseBindings)
             {
                 buildData.Modules.TryGetValue(moduleInfo.Module, out var moduleBuildInfo);
@@ -695,6 +713,7 @@ namespace Flax.Build.Bindings
                 }
                 GenerateBinaryModuleBindings?.Invoke(buildData, moduleInfo, ref bindings);
             }
+            Utilities.WriteFileIfChanged(backendStamp, backend);
         }
 
         /// <summary>

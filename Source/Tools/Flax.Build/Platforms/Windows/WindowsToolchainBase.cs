@@ -29,6 +29,8 @@ namespace Flax.Build.Platforms
         /// The VC tools version.
         /// </summary>
         protected readonly string _vcToolVersion;
+        /// <summary>The selected MSVC tools version, used for compiler built-ins in bindings.</summary>
+        public string VCToolsVersion => _vcToolVersion;
 
         /// <summary>
         /// The compiler path.

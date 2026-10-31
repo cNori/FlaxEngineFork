@@ -745,6 +745,14 @@ namespace Flax.Build.Bindings
             apiType = FindApiTypeInfo(buildData, typeInfo, caller);
             GenerateCppAddFileReference(buildData, caller, typeInfo, apiType);
 
+            // A raw pointer reference crosses as a pointer slot, never pointer-to-reference.
+            // Scripting/aggregate conversions retain their existing dedicated paths.
+            if ((apiType == null || apiType is LangType) && typeInfo.IsPtr && typeInfo.IsRef && typeInfo.GenericArgs == null)
+            {
+                type = typeInfo.ToString(false);
+                return string.Empty;
+            }
+
             // Use dynamic array as wrapper container for fixed-size native arrays
             if (typeInfo.IsArray)
             {
@@ -1379,7 +1387,9 @@ namespace Flax.Build.Bindings
                 if (string.IsNullOrWhiteSpace(CppParamsWrappersCache[i]))
                 {
                     // Pass value
-                    if (UsePassByReference(buildData, parameterInfo.Type, caller))
+                    if (UsePassByReference(buildData, parameterInfo.Type, caller) ||
+                        (parameterInfo.IsRef || parameterInfo.IsOut) && parameterInfo.Type.IsRef && parameterInfo.Type.IsPtr &&
+                        parameterInfo.Type.GenericArgs == null && (FindApiTypeInfo(buildData, parameterInfo.Type, caller) == null || FindApiTypeInfo(buildData, parameterInfo.Type, caller) is LangType))
                         param += '*';
                     param += name;
                 }

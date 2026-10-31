@@ -209,6 +209,11 @@ public:
 private:
     // Internal bindings
 #if !COMPILE_WITHOUT_CSHARP
-    API_FUNCTION(NoProxy) static void GetSamplerInternal(PixelFormat format, API_PARAM(Out) int32& pixelSize, API_PARAM(Out) void** read, API_PARAM(Out) void** write);
+    static void GetSamplerInternal(PixelFormat format, int32& pixelSize, void** read, void** write);
+
+    API_FUNCTION(NoProxy) static void GetSamplerInternal(PixelFormat format, API_PARAM(Out) int32& pixelSize, API_PARAM(Out) void*& read, API_PARAM(Out) void*& write)
+    {
+        GetSamplerInternal(format, pixelSize, &read, &write);
+    }
 #endif
 };
