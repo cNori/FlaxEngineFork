@@ -18,7 +18,7 @@ namespace FlaxEditor.Content.Settings
         /// Renamed UeeHDRProbes into UseHDRProbes
         /// [Deprecated on 12.10.2022, expires on 12.10.2024]
         /// </summary>
-        [Serialize, Obsolete("Use DefaultProbeCubemapFormat instead"), NoUndo]
+        [Serialize, Obsolete("[Deprecated on 12.10.2022, expires on 12.10.2024] Use DefaultProbeCubemapFormat instead."), NoUndo]
         private bool UeeHDRProbes
         {
             get => DefaultProbeCubemapFormat == ProbeCubemapFormats.R11G11B10;
@@ -29,7 +29,7 @@ namespace FlaxEditor.Content.Settings
         /// Use DefaultProbeCubemapFormat instead
         /// [Deprecated in v1.13]
         /// </summary>
-        [Serialize, Obsolete("Use DefaultProbeCubemapFormat instead"), NoUndo]
+        [Serialize, Obsolete("[Deprecated in v1.13] Use DefaultProbeCubemapFormat instead."), NoUndo]
         private bool UseHDRProbes
         {
             get => DefaultProbeCubemapFormat == ProbeCubemapFormats.R11G11B10;
