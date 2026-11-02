@@ -127,7 +127,7 @@ namespace FlaxEditor.Surface
                     // Node IDs must match
                     if (e.NodeId == node.ID)
                     {
-                        uint* nodePath = e.NodePath0;
+                        uint* nodePath = stackalloc uint[8] { e.NodePath0, e.NodePath1, e.NodePath2, e.NodePath3, e.NodePath4, e.NodePath5, e.NodePath6, e.NodePath7 };
 
                         // Get size of the path
                         int nodePathSize = 0;

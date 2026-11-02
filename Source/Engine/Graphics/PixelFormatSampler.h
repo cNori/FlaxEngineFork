@@ -7,7 +7,7 @@
 /// <summary>
 /// Utility for writing and reading from different pixels formats within a single code path.
 /// </summary>
-API_STRUCT(NoDefault) struct FLAXENGINE_API PixelFormatSampler
+API_STRUCT(InBuild, NoDefault) struct FLAXENGINE_API PixelFormatSampler
 {
     DECLARE_SCRIPTING_TYPE_MINIMAL(PixelFormatSampler);
     typedef Float4 (*ReadPixel)(const void* data);

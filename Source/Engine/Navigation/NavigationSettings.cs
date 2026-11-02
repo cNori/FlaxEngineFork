@@ -11,11 +11,11 @@ namespace FlaxEditor.Content.Settings
         /// <summary>
         /// Initializes a new instance of the <see cref="NavigationSettings"/> class.
         /// </summary>
-        public NavigationSettings()
+        public NavigationSettings() : this(__CreateNativeDefault())
         {
             // Init navmeshes
-            NavMeshes = new NavMeshProperties[1];
-            ref var navMesh = ref NavMeshes[0];
+            var navMeshes = new NavMeshProperties[1];
+            ref var navMesh = ref navMeshes[0];
             navMesh.Name = "Default";
             navMesh.Color = Color.Green;
             navMesh.Rotation = Quaternion.Identity;
@@ -28,17 +28,19 @@ namespace FlaxEditor.Content.Settings
             navMesh.DefaultQueryExtent = new Vector3(50.0f, 250.0f, 50.0f);
 
             // Init nav areas
-            NavAreas = new NavAreaProperties[2];
-            ref var areaNull = ref NavAreas[0];
+            var navAreas = new NavAreaProperties[2];
+            ref var areaNull = ref navAreas[0];
             areaNull.Name = "Null";
             areaNull.Color = Color.Transparent;
             areaNull.Id = 0;
             areaNull.Cost = float.MaxValue;
-            ref var areaWalkable = ref NavAreas[1];
+            ref var areaWalkable = ref navAreas[1];
             areaWalkable.Name = "Walkable";
             areaWalkable.Color = Color.Transparent;
             areaWalkable.Id = 63;
             areaWalkable.Cost = 1;
+            NavMeshes = navMeshes;
+            NavAreas = navAreas;
         }
 
         // [Deprecated on 12.01.2021, expires on 12.01.2022]

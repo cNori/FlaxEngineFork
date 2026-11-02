@@ -8,7 +8,7 @@ namespace FlaxEditor.Content.Settings
     /// <summary>
     /// The base class for all the settings assets.
     /// </summary>
-    public abstract class SettingsBase
+    public abstract partial class SettingsBase
     {
     }
 
@@ -39,10 +39,9 @@ namespace FlaxEditor.Content.Settings
         /// <summary>
         /// Initializes a new instance of the <see cref="GraphicsSettings"/>.
         /// </summary>
-        public GraphicsSettings()
+        public GraphicsSettings() : this(__CreateNativeDefault())
         {
-            // Initialize PostFx settings with default options (C# structs don't support it)
-            PostProcessSettings = PostProcessSettings.Default;
+            // Native construction initializes all settings, including PostProcessSettings.
         }
     }
 }

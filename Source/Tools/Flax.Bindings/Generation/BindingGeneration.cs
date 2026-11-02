@@ -92,6 +92,7 @@ internal static class BindingGeneration
                 message.StartsWith("Cannot bind exported field", StringComparison.Ordinal) ||
                 message.StartsWith("Cannot expose struct field", StringComparison.Ordinal) ||
                 message.StartsWith("Reference return may alias", StringComparison.Ordinal) ||
+                message.StartsWith("Native construction is disabled by API_CLASS(NoSpawn)", StringComparison.Ordinal) ||
                 message.StartsWith("Native construction of managed structs", StringComparison.Ordinal) ||
                 message.StartsWith("Native construction/ref-qualified receiver", StringComparison.Ordinal) ||
                 message.StartsWith("Cannot access non-public", StringComparison.Ordinal) ||

@@ -24,7 +24,7 @@ namespace FlaxEngine
                 temp = CollectionsMarshal.AsSpan(customActors).ToArray(); // FIXME
                 tempCount = temp.Length;
             }
-            Internal_DrawSceneDepth(FlaxEngine.Object.GetUnmanagedPtr(context), FlaxEngine.Object.GetUnmanagedPtr(task), FlaxEngine.Object.GetUnmanagedPtr(output), temp, ref tempCount);
+            DrawSceneDepth(context, task, output, temp);
         }
 
         /// <summary>
@@ -42,7 +42,7 @@ namespace FlaxEngine
                 temp = CollectionsMarshal.AsSpan(customActors).ToArray(); // FIXME
                 tempCount = temp.Length;
             }
-            Internal_DrawActors(ref renderContext, temp, ref tempCount);
+            DrawActors(ref renderContext, temp);
         }
     }
 }

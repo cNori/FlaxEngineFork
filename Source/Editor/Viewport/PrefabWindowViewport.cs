@@ -781,7 +781,7 @@ namespace FlaxEditor.Viewport
             if ((view.Flags & ViewFlags.PhysicsDebug) != 0 || view.Mode == ViewMode.PhysicsColliders)
             {
                 foreach (var actor in _debugDrawActors)
-                    DebugDraw.DrawDebugPhysics(actor, renderContext.View);
+                    DebugDraw.DrawDebugPhysics(actor, ref renderContext.View);
             }
 
             // Draw lights debug
@@ -790,7 +790,7 @@ namespace FlaxEditor.Viewport
                 foreach (var actor in _debugDrawActors)
                 {
                     if (actor is Light l && l.IsActiveInHierarchy)
-                        DebugDraw.DrawLightDebug(l, renderContext.View);
+                        DebugDraw.DrawLightDebug(l, ref renderContext.View);
                 }
             }
 

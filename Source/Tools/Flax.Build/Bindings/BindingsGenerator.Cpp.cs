@@ -666,7 +666,7 @@ namespace Flax.Build.Bindings
                 }
 
                 // BitArray
-                if (typeInfo.Type == "BitArray" && typeInfo.GenericArgs != null)
+                if (typeInfo.Type == "BitArray")
                 {
                     // Boolean arrays does not support custom marshalling for some unknown reason
                     type = "bool*";
@@ -882,7 +882,7 @@ namespace Flax.Build.Bindings
                 }
 
                 // BitArray
-                if (typeInfo.Type == "BitArray" && typeInfo.GenericArgs != null)
+                if (typeInfo.Type == "BitArray")
                 {
                     // TODO: automatic converting managed-native for BitArray
                     throw new NotImplementedException("TODO: converting managed BitArray to native");
@@ -1731,6 +1731,13 @@ namespace Flax.Build.Bindings
                     contents.AppendLine($"        MObject* __result = thunk(object->GetOrCreateManagedInstance(){thunkCall}, &exception);");
                 }
 
+                contents.AppendLine("        if (exception)");
+                contents.AppendLine("        {");
+                contents.AppendLine("            WrapperCallInstance = prevWrapperCallInstance;");
+                contents.AppendLine("            DebugLog::LogException(exception);");
+                GenerateCppReturn(buildData, contents, "            ", functionInfo.ReturnType);
+                contents.AppendLine("        }");
+
                 // Convert parameter values back from managed to native (could be modified there)
                 for (var i = 0; i < functionInfo.Parameters.Count; i++)
                 {
@@ -1759,6 +1766,13 @@ namespace Flax.Build.Bindings
 
                 // Invoke method
                 contents.AppendLine("        MObject* __result = method->Invoke(object->GetOrCreateManagedInstance(), params, &exception);");
+
+                contents.AppendLine("        if (exception)");
+                contents.AppendLine("        {");
+                contents.AppendLine("            WrapperCallInstance = prevWrapperCallInstance;");
+                contents.AppendLine("            DebugLog::LogException(exception);");
+                GenerateCppReturn(buildData, contents, "            ", functionInfo.ReturnType);
+                contents.AppendLine("        }");
 
                 // Convert parameter values back from managed to native (could be modified there)
                 for (var i = 0; i < functionInfo.Parameters.Count; i++)
@@ -2231,7 +2245,7 @@ namespace Flax.Build.Bindings
             var useCSharp = EngineConfiguration.WithCSharp(buildData.TargetOptions);
             var hasInterface = classInfo.Interfaces != null && classInfo.Interfaces.Any(x => x.Access == AccessLevel.Public);
 
-            if (classInfo.IsAutoSerialization)
+            if (classInfo.IsAutoSerialization && !UseV2Generator)
                 GenerateCppAutoSerialization(buildData, contents, moduleInfo, classInfo, classTypeNameNative);
             GenerateCppTypeInternalsStatics?.Invoke(buildData, classInfo, contents);
 
@@ -2558,7 +2572,7 @@ namespace Flax.Build.Bindings
             var internalTypeName = structureTypeNameInternal + "Internal";
             var useCSharp = EngineConfiguration.WithCSharp(buildData.TargetOptions);
 
-            if (structureInfo.IsAutoSerialization)
+            if (structureInfo.IsAutoSerialization && !UseV2Generator)
                 GenerateCppAutoSerialization(buildData, contents, moduleInfo, structureInfo, structureTypeNameNative);
             GenerateCppTypeInternalsStatics?.Invoke(buildData, structureInfo, contents);
 
@@ -3240,7 +3254,32 @@ namespace Flax.Build.Bindings
 
                         header.AppendFormat("    DLLEXPORT USED void Unbox({0}& result, MObject* data)", fullName).AppendLine();
                         header.Append("    {").AppendLine();
-                        header.AppendFormat("        result = ToNative(*reinterpret_cast<{0}*>(MCore::Object::Unbox(data)));", wrapperName).AppendLine();
+                        if (UseV2Generator)
+                        {
+                            CppIncludeFiles.Add("Engine/Scripting/ManagedCLR/MField.h");
+                            CppIncludeFiles.Add("stdexcept");
+                            header.AppendLine("        if (!data) throw std::invalid_argument(\"Cannot unbox a null managed value\");");
+                            header.AppendLine("        struct Root { MGCHandle handle; ~Root() { MCore::GCHandle::Free(handle); } } root{MCore::GCHandle::New(data)};");
+                            header.AppendLine("        auto klass = MCore::Object::GetClass(data);");
+                            header.AppendFormat("        {0} managed{{}};", wrapperName).AppendLine();
+                            foreach (var fieldInfo in fields)
+                            {
+                                if (fieldInfo.IsStatic || fieldInfo.IsConstexpr) continue;
+                                if (fieldInfo.NoArray && fieldInfo.Type.IsArray)
+                                {
+                                    for (int item = 0; item < fieldInfo.Type.ArraySize; ++item)
+                                        EmitField(fieldInfo.Name + item, fieldInfo.Name + "[" + item + "]");
+                                }
+                                else EmitField(fieldInfo.Name, fieldInfo.Name);
+                            }
+                            header.AppendLine("        result = ToNative(managed);");
+                            void EmitField(string managedName, string nativeName)
+                            {
+                                header.AppendFormat("        {{ auto field = klass->GetField(\"{0}\"); if (!field) throw std::invalid_argument(\"Missing managed field: {0}\"); field->GetValue(data, &managed.{1}); }}", managedName, nativeName).AppendLine();
+                            }
+                        }
+                        else
+                            header.AppendFormat("        result = ToNative(*reinterpret_cast<{0}*>(MCore::Object::Unbox(data)));", wrapperName).AppendLine();
                         header.Append("    }").AppendLine();
 
                         header.AppendFormat("    DLLEXPORT USED void ToManagedArray(MArray* result, const Span<{0}>& data)", fullName).AppendLine();

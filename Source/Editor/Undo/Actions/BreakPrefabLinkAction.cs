@@ -135,9 +135,9 @@ namespace FlaxEditor.Actions
             for (int i = 0; i < items.Count; i++)
             {
                 var item = items[i];
-                var obj = Object.Find<Object>(ref item.ID);
+                var obj = Object.Find<SceneObject>(ref item.ID);
                 if (obj != null)
-                    SceneObject.Internal_LinkPrefab(Object.GetUnmanagedPtr(obj), ref item.PrefabID, ref item.PrefabObjectID);
+                    obj.LinkPrefab(in item.PrefabID, in item.PrefabObjectID);
             }
         }
 

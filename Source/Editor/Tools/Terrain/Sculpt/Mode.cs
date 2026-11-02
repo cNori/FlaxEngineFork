@@ -120,7 +120,7 @@ namespace FlaxEditor.Tools.Terrain.Sculpt
 
                 // Get the patch data (cached internally by the c++ core in editor)
                 float* sourceHeights = EditHoles ? null : TerrainTools.GetHeightmapData(terrain, ref patch.PatchCoord);
-                byte* sourceHoles = EditHoles ? TerrainTools.GetHolesMaskData(terrain, ref patch.PatchCoord) : null;
+                byte* sourceHoles = EditHoles ? (byte*)TerrainTools.GetHolesMaskData(terrain, ref patch.PatchCoord) : null;
                 if (sourceHeights == null && sourceHoles == null)
                     throw new Exception("Cannot modify terrain. Loading heightmap failed. See log for more info.");
 

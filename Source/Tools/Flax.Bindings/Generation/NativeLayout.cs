@@ -122,6 +122,7 @@ internal sealed class NativeLayout
     }
     static bool LayoutNeutralMacro(RawDeclarationDescriptor raw, FileDescriptor? source)
     {
+        if (raw.HeaderTokens.FirstOrDefault(t => !t.IsTrivia) == "friend") return true;
         if (source == null || !source.Converters.LayoutNeutralDeclarationMacros.Contains(raw.Name.text ?? "")) return false;
         var tokens = raw.HeaderTokens.Where(t => !t.IsTrivia).ToArray();
         if (tokens.Length < 3 || tokens[0].text != raw.Name.text || tokens[1] != "(") return false;

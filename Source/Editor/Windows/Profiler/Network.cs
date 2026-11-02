@@ -21,7 +21,7 @@ namespace FlaxEngine
             {
                 get
                 {
-                    fixed (byte* name = Name0)
+                    fixed (byte* name = __NativeBuffer_Name.Data)
                         return System.Runtime.InteropServices.Marshal.PtrToStringAnsi(new IntPtr(name));
                 }
             }

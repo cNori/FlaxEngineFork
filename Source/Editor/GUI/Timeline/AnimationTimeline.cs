@@ -90,7 +90,7 @@ namespace FlaxEditor.GUI.Timeline
         public void Save(Animation asset)
         {
             var data = Save();
-            asset.SaveTimeline(data);
+            asset.SaveTimeline(ref data);
             asset.Reload();
         }
 

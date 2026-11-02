@@ -7,6 +7,7 @@ internal sealed class SourceProject
     public required FileDescriptor Root { get; init; }
     public List<FileDescriptor> Files { get; } = [];
     public List<LogEntry> Diagnostics { get; } = [];
+    public HashSet<string> IncludeResolutionProbes { get; } = new(StringComparer.OrdinalIgnoreCase);
     public int DiscoveredHeaderCount { get; private set; }
 
     public static SourceProject Load(string rootPath, IEnumerable<string>? includeDirectories = null,
@@ -25,6 +26,7 @@ internal sealed class SourceProject
         List<Action<string, PreprocessorMacro?>> macroObservers = [];
         var excluded = (excludedDirectories ?? []).Select(Path.GetFullPath).ToArray();
         List<LogEntry> logs = [];
+        HashSet<string> includeProbes = new(StringComparer.OrdinalIgnoreCase);
         static bool Header(string path) => string.Equals(Path.GetExtension(path), ".h", StringComparison.OrdinalIgnoreCase);
         FileDescriptor Read(string input)
         {
@@ -78,8 +80,13 @@ internal sealed class SourceProject
                 }
                 string include = literal.Groups["quoted"].Value;
                 if (!Header(include)) return;
-                string? resolved = new[] { Path.GetDirectoryName(path)! }.Concat(roots)
-                    .Select(directory => Path.GetFullPath(Path.Combine(directory, include))).FirstOrDefault(System.IO.File.Exists);
+                string? resolved = null;
+                foreach (string directory in new[] { Path.GetDirectoryName(path)! }.Concat(roots))
+                {
+                    string candidate = Path.GetFullPath(Path.Combine(directory, include));
+                    includeProbes.Add(candidate);
+                    if (System.IO.File.Exists(candidate)) { resolved = candidate; break; }
+                }
                 if (resolved == null)
                 {
                     preprocessorLogs.Add(new($"Cannot resolve active include '{include}'. Supply an --include-dir search path; its types are not indexed.", where, LogEntryType.Warning, "VETP005", path)); return;
@@ -116,6 +123,7 @@ internal sealed class SourceProject
         foreach (var path in discovered) if (!files.ContainsKey(path)) ReadStandalone(path);
         SourceProject project = new() { Root = root };
         project.DiscoveredHeaderCount = discovered.Count;
+        project.IncludeResolutionProbes.UnionWith(includeProbes);
         project.Files.AddRange(files.Values); project.Diagnostics.AddRange(logs);
         return project;
 

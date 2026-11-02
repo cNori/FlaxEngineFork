@@ -174,6 +174,7 @@ namespace VETools.Text
                                 stream.Errors.AddRange(body.Errors);
                             }
                             scope.Add(type);
+                            if (type.HasTrailingDeclarator) declarationTokens.Add(type.Name);
                             continue;
                         case "enum":
                             if (InTemplateArgument(declarationTokens)) { declarationTokens.Add(stream.Next()); continue; }
@@ -207,6 +208,7 @@ namespace VETools.Text
                     {
                         RawDeclarationDescriptor macro = new() { HeaderTokens = new(declarationTokens) };
                         SetContext(macro, namespaceTokens, enclosingTypeTokens, access); scope.Add(macro);
+                        if (significant[0] == "API_AUTO_SERIALIZATION" && scope is TypeDescriptor) access = "public";
                     }
                     else AddFields(scope, declarationTokens, namespaceTokens, enclosingTypeTokens, access);
                     declarationTokens.Clear();
@@ -957,10 +959,11 @@ namespace VETools.Text
             }
 
             source.Body = ReadGroup(stream, "{", "}");
-            // ReadScope recursively fills the type descriptor; interface rules are validated later.
+            // A record definition can also declare fields: struct Inner { ... } Value;
+            // Keep the type name as the next declaration's specifier.
             stream.SkipNoise();
-            if (stream.Peek() == ";")
-                stream.Next();
+            if (stream.Peek() == ";") stream.Next();
+            else source.HasTrailingDeclarator = true;
             return source;
         }
 

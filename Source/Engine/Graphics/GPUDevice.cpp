@@ -815,7 +815,13 @@ void* GPUDevice::GetResourcesInternal()
     MArray* result = MCore::Array::New(GPUResource::TypeInitializer.GetClass(), _resources.Count());
     int32 i = 0;
     for (const auto& e : _resources)
-        MCore::GC::WriteArrayRef(result, e->GetOrCreateManagedInstance(), i++);
+    {
+        // Internal resources can inherit GPUResource's abstract scripting type
+        // without exposing their own managed class. They have no managed wrapper.
+        const auto managedClass = e->GetClass();
+        const auto managedInstance = managedClass && !managedClass->IsAbstract() ? e->GetOrCreateManagedInstance() : nullptr;
+        MCore::GC::WriteArrayRef(result, managedInstance, i++);
+    }
     _resourcesLock.Unlock();
     return result;
 }

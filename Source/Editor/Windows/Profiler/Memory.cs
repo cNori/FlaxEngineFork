@@ -222,9 +222,9 @@ namespace FlaxEditor.Windows.Profiler
             if (_warningText != null)
                 _warningText.Visible = true;
             var frame = _frames.Get(selectedFrame);
-            var totalUage = frame.Usage.Values0[(int)ProfilerMemory.Groups.TotalTracked];
-            var totalPeek = frame.Peek.Values0[(int)ProfilerMemory.Groups.TotalTracked];
-            var totalCount = frame.Count.Values0[(int)ProfilerMemory.Groups.TotalTracked];
+            var totalUage = frame.Usage.GetValue((int)ProfilerMemory.Groups.TotalTracked);
+            var totalPeek = frame.Peek.GetValue((int)ProfilerMemory.Groups.TotalTracked);
+            var totalCount = frame.Count.GetValue((int)ProfilerMemory.Groups.TotalTracked);
 
             // Sort by memory size
             if (_groupOrder == null)
@@ -234,18 +234,18 @@ namespace FlaxEditor.Windows.Profiler
             Array.Sort(_groupOrder, (x, y) =>
             {
                 var tmp = _frames.Get(selectedFrame);
-                return tmp.Usage.Values0[y].CompareTo(tmp.Usage.Values0[x]);
+                return tmp.Usage.GetValue(y).CompareTo(tmp.Usage.GetValue(x));
             });
 
             // Add rows
             for (int i = 0; i < (int)ProfilerMemory.Groups.MAX; i++)
             {
                 var group = _groupOrder[i];
-                var groupUsage = frame.Usage.Values0[group];
+                var groupUsage = frame.Usage.GetValue(group);
                 if (groupUsage <= 0)
                     continue;
-                var groupPeek = frame.Peek.Values0[group];
-                var groupCount = frame.Count.Values0[group];
+                var groupPeek = frame.Peek.GetValue(group);
+                var groupCount = frame.Count.GetValue(group);
 
                 Row row;
                 if (_tableRowsCache.Count != 0)

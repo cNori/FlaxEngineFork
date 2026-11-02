@@ -107,7 +107,7 @@ namespace FlaxEngine
         /// <summary>
         /// Gets the parent model asset.
         /// </summary>
-        public Model ParentModel => (Model)Internal_GetParentModel(__unmanagedPtr);
+        public Model ParentModel => (Model)Internal_GetParentModel();
 
         /// <summary>
         /// Updates the model mesh vertex and index buffer data.
@@ -141,7 +141,7 @@ namespace FlaxEngine
             if (colors != null && colors.Length != vertices.Length)
                 throw new ArgumentOutOfRangeException(nameof(colors));
 
-            if (Internal_UpdateMeshUInt(__unmanagedPtr, vertices.Length, triangles.Length / 3, vertices, triangles, normals, tangents, uv, colors))
+            if (Internal_UpdateMeshUInt(vertices.Length, triangles.Length / 3, vertices, triangles, normals, tangents, uv, colors))
                 throw new Exception("Failed to update mesh data.");
         }
 
@@ -177,7 +177,7 @@ namespace FlaxEngine
             if (colors != null && colors.Count != vertices.Count)
                 throw new ArgumentOutOfRangeException(nameof(colors));
 
-            if (Internal_UpdateMeshUInt(__unmanagedPtr, vertices.Count, triangles.Count / 3, Utils.ExtractArrayFromList(vertices), Utils.ExtractArrayFromList(triangles), Utils.ExtractArrayFromList(normals), Utils.ExtractArrayFromList(tangents), Utils.ExtractArrayFromList(uv), Utils.ExtractArrayFromList(colors)))
+            if (Internal_UpdateMeshUInt(vertices.Count, triangles.Count / 3, Utils.ExtractArrayFromList(vertices), Utils.ExtractArrayFromList(triangles), Utils.ExtractArrayFromList(normals), Utils.ExtractArrayFromList(tangents), Utils.ExtractArrayFromList(uv), Utils.ExtractArrayFromList(colors)))
                 throw new Exception("Failed to update mesh data.");
         }
 
@@ -213,7 +213,7 @@ namespace FlaxEngine
             if (colors != null && colors.Length != vertices.Length)
                 throw new ArgumentOutOfRangeException(nameof(colors));
 
-            if (Internal_UpdateMeshUInt(__unmanagedPtr, vertices.Length, triangles.Length / 3, vertices, triangles, normals, tangents, uv, colors))
+            if (Internal_UpdateMeshUInt(vertices.Length, triangles.Length / 3, vertices, triangles, normals, tangents, uv, colors))
                 throw new Exception("Failed to update mesh data.");
         }
 
@@ -249,7 +249,7 @@ namespace FlaxEngine
             if (colors != null && colors.Count != vertices.Count)
                 throw new ArgumentOutOfRangeException(nameof(colors));
 
-            if (Internal_UpdateMeshUInt(__unmanagedPtr, vertices.Count, triangles.Count / 3, Utils.ExtractArrayFromList(vertices), Utils.ExtractArrayFromList(triangles), Utils.ExtractArrayFromList(normals), Utils.ExtractArrayFromList(tangents), Utils.ExtractArrayFromList(uv), Utils.ExtractArrayFromList(colors)))
+            if (Internal_UpdateMeshUInt(vertices.Count, triangles.Count / 3, Utils.ExtractArrayFromList(vertices), Utils.ExtractArrayFromList(triangles), Utils.ExtractArrayFromList(normals), Utils.ExtractArrayFromList(tangents), Utils.ExtractArrayFromList(uv), Utils.ExtractArrayFromList(colors)))
                 throw new Exception("Failed to update mesh data.");
         }
 
@@ -285,7 +285,7 @@ namespace FlaxEngine
             if (colors != null && colors.Length != vertices.Length)
                 throw new ArgumentOutOfRangeException(nameof(colors));
 
-            if (Internal_UpdateMeshUShort(__unmanagedPtr, vertices.Length, triangles.Length / 3, vertices, triangles, normals, tangents, uv, colors))
+            if (Internal_UpdateMeshUShort(vertices.Length, triangles.Length / 3, vertices, triangles, normals, tangents, uv, colors))
                 throw new Exception("Failed to update mesh data.");
         }
 
@@ -321,7 +321,7 @@ namespace FlaxEngine
             if (colors != null && colors.Count != vertices.Count)
                 throw new ArgumentOutOfRangeException(nameof(colors));
 
-            if (Internal_UpdateMeshUShort(__unmanagedPtr, vertices.Count, triangles.Count / 3, Utils.ExtractArrayFromList(vertices), Utils.ExtractArrayFromList(triangles), Utils.ExtractArrayFromList(normals), Utils.ExtractArrayFromList(tangents), Utils.ExtractArrayFromList(uv), Utils.ExtractArrayFromList(colors)))
+            if (Internal_UpdateMeshUShort(vertices.Count, triangles.Count / 3, Utils.ExtractArrayFromList(vertices), Utils.ExtractArrayFromList(triangles), Utils.ExtractArrayFromList(normals), Utils.ExtractArrayFromList(tangents), Utils.ExtractArrayFromList(uv), Utils.ExtractArrayFromList(colors)))
                 throw new Exception("Failed to update mesh data.");
         }
 
@@ -455,7 +455,7 @@ namespace FlaxEngine
         [Obsolete("Use new MeshAccessor and depend on GPUVertexLayout when accessing mesh data.")]
         public Vertex0[] DownloadVertexBuffer0(bool forceGpu = false)
         {
-            var result = (Vertex0[])Internal_DownloadBuffer(__unmanagedPtr, forceGpu, typeof(Vertex0), (int)InternalBufferType.VB0);
+            var result = (Vertex0[])Internal_DownloadBuffer(forceGpu, typeof(Vertex0), (int)InternalBufferType.VB0);
             if (result == null)
                 throw new Exception("Failed to download mesh data.");
             return result;
@@ -470,7 +470,7 @@ namespace FlaxEngine
         [Obsolete("Use new MeshAccessor and depend on GPUVertexLayout when accessing mesh data.")]
         public Vertex1[] DownloadVertexBuffer1(bool forceGpu = false)
         {
-            var result = (Vertex1[])Internal_DownloadBuffer(__unmanagedPtr, forceGpu, typeof(Vertex1), (int)InternalBufferType.VB1);
+            var result = (Vertex1[])Internal_DownloadBuffer(forceGpu, typeof(Vertex1), (int)InternalBufferType.VB1);
             if (result == null)
                 throw new Exception("Failed to download mesh data.");
             return result;
@@ -490,7 +490,7 @@ namespace FlaxEngine
         {
             if (!HasVertexColors)
                 return null;
-            var result = (Vertex2[])Internal_DownloadBuffer(__unmanagedPtr, forceGpu, typeof(Vertex2), (int)InternalBufferType.VB2);
+            var result = (Vertex2[])Internal_DownloadBuffer(forceGpu, typeof(Vertex2), (int)InternalBufferType.VB2);
             if (result == null)
                 throw new Exception("Failed to download mesh data.");
             return result;
@@ -544,7 +544,7 @@ namespace FlaxEngine
         /// <returns>The triangle points in the collision proxy.</returns>
         internal Vector3[] GetCollisionProxyPoints()
         {
-            return Internal_GetCollisionProxyPoints(__unmanagedPtr, out _);
+            return Internal_GetCollisionProxyPoints();
         }
 #endif
     }

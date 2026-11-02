@@ -270,7 +270,7 @@ namespace FlaxEditor.Modules
             }
 
             // Call backend
-            var failed = PrefabManager.Internal_ApplyAll(FlaxEngine.Object.GetUnmanagedPtr(instance));
+            var failed = PrefabManager.ApplyAll(instance);
             if (prefabRoot != null)
             {
                 prefabRoot.LocalTransform = originalTransform;

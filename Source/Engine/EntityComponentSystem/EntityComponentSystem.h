@@ -285,11 +285,14 @@ public:
     };
 };
 
-API_CLASS() class Class : public ScriptingObject
+// Declaration-only scratch type; binding tests live in the tooling fixtures.
+class Class : public ScriptingObject
 {
     DECLARE_SCRIPTING_TYPE(Class);
-    API_FUNCTION() static void func(const Array<Class>& a);
-    API_FUNCTION() static void func1(const Array<Class*>& a); //fine
+    // Negative binding case: scripting objects cannot be copied inline into arrays.
+    // Kept native-only; generator rejection is covered by ContainerChecks.
+    static void func(const Array<Class>& a);
+    static void func1(const Array<Class*>& a);
 };
 
 /*

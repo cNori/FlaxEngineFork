@@ -603,7 +603,7 @@ namespace FlaxEditor.CustomEditors.Editors
                               (elementType.GetFields(bindingAttr).Length == 1 && elementType.GetProperties(bindingAttr).Length == 0) ||
                               (elementType.GetProperties(bindingAttr).Length == 1 && elementType.GetFields(bindingAttr).Length == 0) ||
                               elementType.Equals(new ScriptType(typeof(JsonAsset))) ||
-                              elementType.Equals(new ScriptType(typeof(SettingsBase)));
+                              elementType.Equals(new ScriptType(typeof(FlaxEditor.Content.Settings.SettingsBase)));
                 if (_cachedDropPanels == null)
                     _cachedDropPanels = new List<CollectionDropPanel>();
                 else

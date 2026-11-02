@@ -7,7 +7,7 @@
 /// <summary>
 /// Scene for editor previews with support of object drawing and updating in separation of global scenes collection. It mocks the gameplay to preview scene objects.
 /// </summary>
-API_CLASS() class EditorScene final : public Scene
+API_CLASS(Namespace="FlaxEngine") class EditorScene final : public Scene
 {
 DECLARE_SCENE_OBJECT(EditorScene);
 public:

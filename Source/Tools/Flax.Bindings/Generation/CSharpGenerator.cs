@@ -8,6 +8,7 @@ namespace VETools.Generation;
 internal sealed class CSharpGenerationResult
 {
     public string Source = "";
+    public FileDescriptor? NativeSource;
     public List<LogEntry> Diagnostics = [];
     public List<LogEntry> Notes = [];
     public List<string> NativeInjectedCode = [];
@@ -23,6 +24,8 @@ internal sealed class CSharpGenerationResult
 internal sealed class CSharpGenerator
 {
     sealed record EmittedSignature(FunctionDescriptor Native, string Managed, IReadOnlyList<string> ParameterTypes);
+    sealed record NativeOrderOverload(FunctionDescriptor Native, Dictionary<string, EmittedSignature> Signatures, string Key, string Declaration);
+    readonly List<NativeOrderOverload> nativeOrderOverloads = [];
     readonly CSharpGenerationResult result = new();
     readonly StringBuilder output = new();
     readonly NativeLayout layout = new();
@@ -38,6 +41,7 @@ internal sealed class CSharpGenerator
     {
         var generator = new CSharpGenerator();
         generator.sourceTokens = file.Tokens;
+        generator.result.NativeSource = file;
         generator.declarationMacros = file.Converters.DeclarationMacros;
         generator.result.ProjectClassLifetimes = file.ProjectClassLifetimes;
         generator.result.NativeInjectedCode.AddRange(TemplateInstantiationPass.Declarations(file)
@@ -114,7 +118,13 @@ internal sealed class CSharpGenerator
         if (alias.TemplateParameters.Count != 0)
         { Note(alias, $"Alias template '{alias.QualifiedName}' is retained for concrete type substitution; no open managed alias is emitted."); return; }
         if (alias.TypeInfo is NamedTypeInfo { Specialization.Concrete: { } concrete })
-        { Note(alias, $"Concrete typedef '{alias.QualifiedName}' maps to '{concrete.QualifiedName}' ({concrete.NativeQualifiedName}); equivalent aliases share one specialization."); return; }
+        {
+            string? managedAlias = alias.SourceFile?.Converters.ManagedValueAlias(alias.TypeInfo);
+            Note(alias, managedAlias == null
+                ? $"Concrete typedef '{alias.QualifiedName}' maps to '{concrete.QualifiedName}' ({concrete.NativeQualifiedName}); equivalent aliases share one specialization."
+                : $"Concrete typedef '{alias.QualifiedName}' uses managed type '{managedAlias}' while sharing native specialization '{concrete.NativeQualifiedName}'.");
+            return;
+        }
         if (alias.TypeInfo is NamedTypeInfo { Resolution: TypeResolution.Builtin } or NamedTypeInfo { Converter.IsAlias: true } || alias.Api.Alias)
         { Note(alias, $"Exported transparent typedef '{alias.QualifiedName}' resolves to '{alias.TypeInfo?.Display}'; C# uses the underlying type."); return; }
         if (alias.TypeInfo is NamedTypeInfo { Specialization: { } } specialization)
@@ -135,12 +145,14 @@ internal sealed class CSharpGenerator
             var nestedEnums = plan.Members(type).OfType<EnumDescriptor>().ToArray();
             bool knownPartial = type.SourceFile?.Converters.ManagedValuePartial(type.QualifiedName) != null;
             bool nativeDefault = CanEmitNativeDefault(type);
-            if (nestedEnums.Length != 0 || nativeDefault || !knownPartial && type.Api.ManagedAttributes.Count != 0)
+            if (knownPartial || nestedEnums.Length != 0 || nativeDefault || type.Api.ManagedAttributes.Count != 0)
             {
                 Documentation(type); if (!knownPartial) EmitAttributes(type);
-                Line($"{Access(type, nested)} partial struct {Id(HandleNetCS.SimpleName(type))}"); Open();
+                Line($"{Access(type, nested)} partial {(type is ClassDescriptor ? "class" : "struct")} {Id(HandleNetCS.SimpleName(type))}"); Open();
                 foreach (var nestedEnum in nestedEnums) Enum(nestedEnum, true);
                 if (nativeDefault) EmitNativeDefault(type);
+                var staticMembers = plan.Members(type).Where(d => d is FieldDescriptor f && NativeLayout.IsStatic(f) || d is FunctionDescriptor fn && BindingSignaturePass.IsStatic(fn)).ToArray();
+                if (staticMembers.Length != 0) { storageScopes.Push(null); Members(staticMembers, true, false, false); storageScopes.Pop(); }
                 Close();
             }
             return;
@@ -203,9 +215,43 @@ internal sealed class CSharpGenerator
             NativeAccessView: type.MarshalAsType == null && type is StructDescriptor { RequiresNativeFieldAccess: true } or StructDescriptor { NativeFieldView: true }));
         storageScopes.Push(nativeStorage);
         Members(plan.Members(type), isStruct, isInterface, false);
+        if (nativeStorage != null)
+            foreach (var (field, scalar) in type.PrivateScalarStorage)
+            {
+                string storageName = "__VETStorage_" + field.Name.text;
+                if (type.Declarations.Any(d => HandleNetCS.SimpleName(d) == storageName)) { Error(field, "Private native storage name conflicts with a declared member."); continue; }
+                Line($"[global::System.Runtime.InteropServices.FieldOffset({nativeStorage.Offsets[field]})]"); EmitScalarMarshal(scalar);
+                Line($"private {scalar} {Id(storageName)};");
+            }
+        if (scripting && !type.Api.Static && !type.Api.NoConstructor)
+        {
+            string constructorAccess = type.Api.NoSpawn ? (type.IsFinal || type.Api.Sealed ? "private" : "private protected") : type.Api.Abstract ? "protected" : "public";
+            Line("/// <summary>Initializes this managed object through the engine scripting-object construction path.</summary>");
+            Line($"{constructorAccess} {Id(HandleNetCS.SimpleName(type))}() : base() {{ }}");
+        }
         if (CanEmitNativeDefault(type)) EmitNativeDefault(type);
+        if (type is ClassDescriptor cls && CanEmitDefaultConstructor(cls)) EmitDefaultConstructor(cls);
         storageScopes.Pop();
         Close();
+    }
+
+    bool CanEmitDefaultConstructor(ClassDescriptor type)
+    {
+        if (type.Api.Abstract || type.Api.Static || type.Api.InBuild || type.Api.NoSpawn || type.Api.Template || type.MarshalAsType != null || HandleNETcpp.IsScriptingObject(type)) return false;
+        var constructors = type.Functions.Where(f => f.TypeInfo?.IsConstructor == true).ToArray();
+        if (constructors.Any(plan.Emits)) return false;
+        if (constructors.Length != 0 && !constructors.Any(f => f.Access == "public" && !f.HeaderTokens.Any(t => t == "delete") && f.Fields.All(p => p.InitializerTokens.Count != 0))) return false;
+        if (type.Functions.Any(f => f.TypeInfo?.IsDestructor == true && (f.Access != "public" || f.HeaderTokens.Any(t => t == "delete")))) return false;
+        if (constructors.Length == 0 && type.Fields.Any(f => !NativeLayout.IsStatic(f) && f.TypeInfo is ReferenceTypeInfo && f.InitializerTokens.Count == 0)) return false;
+        return true;
+    }
+
+    void EmitDefaultConstructor(ClassDescriptor type)
+    {
+        var factory = new FunctionDescriptor { Parent = type, Name = type.Name,
+            NamespaceTokens = type.NamespaceTokens, EnclosingTypeTokens = type.EnclosingTypeTokens.Concat([type.Name]).ToList(),
+            NativeConstructorFactoryOnly = type.Api.NoConstructor, TypeInfo = new() { IsConstructor = true } };
+        Function(factory, false, false, false, new(StringComparer.Ordinal), type.Api.NoConstructor ? "private" : "public");
     }
 
     bool CanEmitNativeDefault(TypeDescriptor type) => type.SourceFile?.Converters.CanonicalValueRecords == true &&
@@ -252,7 +298,7 @@ internal sealed class CSharpGenerator
                 {
                     if (EventInterop.Describe(field, out var description, out var reason))
                     {
-                        Note(field, description!.Synchronous ? "Event handlers run synchronously on the subscription thread. Wrong-thread invocations are rejected and reported; payload changes are copied back before native execution continues." : "Event handlers use asynchronous owner-thread delivery. Pump pending events on the subscription thread when no suitable SynchronizationContext is available; synchronous side effects/ref/out are not supported by this bridge.");
+                        Note(field, description!.Synchronous ? "Event handlers run synchronously on the subscription thread. Wrong-thread invocations are rejected and reported; payload changes are copied back before native execution continues." : field.SourceFile?.Converters.DefaultManagedNamespace is "FlaxEngine" or "FlaxEditor" ? "Event handlers run on their subscription thread. Owner-thread notifications run immediately; main-thread subscriptions dispatch worker notifications on the engine update. Other subscription threads require a SynchronizationContext or explicit pumping." : "Event handlers use asynchronous owner-thread delivery. Pump pending events on the subscription thread when no suitable SynchronizationContext is available; synchronous side effects/ref/out are not supported by this bridge.");
                         if (description.Synchronous) {
                             Line("/// <summary>Synchronous event handler; native ref arguments are copied back before the callback returns.</summary>");
                             Line(Access(field, true) + " delegate void " + description.SynchronousDelegate + "(" + string.Join(", ", description.Arguments.Select((a, i) => (a.MutableReference ? "ref " : "") + a.Managed + " arg" + i)) + ");");
@@ -294,15 +340,15 @@ internal sealed class CSharpGenerator
                     Line($"[global::System.Runtime.InteropServices.FieldOffset({offset})]");
                     EmitScalarMarshal(mapped);
                 }
-                Line($"{field.Api.ManagedAccess ?? (globals ? "public" : Access(field, true))} {(isStatic ? "static " : "")}{(isReadOnly ? "readonly " : "")}{mapped} {Id(field.Name.text)};");
-                result.Bindings.Add(new(EmittedBindingKind.Field, field, mapped + " " + Id(field.Name.text), field.TypeInfo));
+                Line($"{field.Api.ManagedAccess ?? (globals ? "public" : Access(field, true))} {(isStatic ? "static " : "")}{(isReadOnly ? "readonly " : "")}{mapped} {ManagedFieldName(field)};");
+                result.Bindings.Add(new(EmittedBindingKind.Field, field, mapped + " " + ManagedFieldName(field), field.TypeInfo));
                 if (!isStatic && !isReadOnly && isStruct && field.Parent is StructDescriptor fieldOwner && field.TypeInfo is not ArrayTypeInfo &&
                     field.Api.ManagedAccess == "private" && storageScopes.TryPeek(out var fieldStorage) && fieldStorage != null)
                 {
                     string read = AutomaticFieldConverters.FieldMethod(field, false), write = AutomaticFieldConverters.FieldMethod(field, true);
                     if (!names.Add(read) || !names.Add(write) || fieldOwner.Declarations.Any(d => d.Name.text == read || d.Name.text == write))
                         Error(field, "Generated field conversion helper collides with a declared member.");
-                    string ownerName = HandleNetCS.ManagedName(fieldOwner), member = Id(field.Name.text);
+                    string ownerName = HandleNetCS.ManagedName(fieldOwner), member = ManagedFieldName(field);
                     Line($"internal static {mapped} {read}(in {ownerName} value) => value.{member};");
                     Line($"internal static void {write}(ref {ownerName} value, {mapped} input) => value.{member} = input;");
                 }
@@ -313,16 +359,25 @@ internal sealed class CSharpGenerator
                 if (fieldNames.Contains(plan.ManagedName(function))) Error(function, "Generated method conflicts with a field name.");
                 if (function.Api.NoProxy && isInterface)
                 { Error(function, "API_FUNCTION(NoProxy) cannot be emitted on an interface: a private native-call implementation requires a concrete class or struct."); continue; }
-                Function(function, isInterface, isStruct, globals, signatures, function.Api.NoProxy ? "private" : null);
+                Function(function, isInterface, isStruct, globals, signatures, function.Api.NoProxy ? (function.SourceFile?.Converters.DefaultManagedNamespace != null ? "internal" : "private") : null);
             }
             else Error(declaration, "Raw member needs an explicit generation handler.");
+        }
+        foreach (var overload in nativeOrderOverloads.Where(o => ReferenceEquals(o.Signatures, signatures)).ToArray())
+        {
+            nativeOrderOverloads.Remove(overload);
+            if (signatures.ContainsKey(overload.Key))
+            { Note(overload.Native, "Native-order compatibility overload omitted because its C# signature already exists. Use named arguments to specify the reordered parameters explicitly."); continue; }
+            signatures.Add(overload.Key, new(overload.Native, overload.Declaration, []));
+            Line("/// <summary>Forwards arguments supplied in the original native declaration order.</summary>");
+            Line(overload.Declaration);
         }
     }
 
     void Property(PropertyProjection property, bool isInterface, bool isStruct, bool globals)
     {
         var field = property.Field;
-        string? mapped = Map(field.TypeInfo, field, false);
+        string? mapped = Map(field.IsBitField && property.Getter?.AccessedField == field ? property.Getter.TypeInfo?.ReturnType : field.TypeInfo, field, false);
         if (mapped == null || mapped == "void") return;
         if (isStruct && property.Access == "protected") { Error(field, "Protected property cannot be represented on a C# struct."); return; }
         string access = field.Api.ManagedAccess ?? (globals ? "public" : property.Access);
@@ -344,7 +399,7 @@ internal sealed class CSharpGenerator
             Line($"get => {method}(in {cache});");
             Line($"set => {cache} = {method}(in value);");
             Close();
-            result.Bindings.Add(new(EmittedBindingKind.Property, field, mapped + " " + Id(field.Name.text), field.TypeInfo, Property: property));
+            result.Bindings.Add(new(EmittedBindingKind.Property, field, mapped + " " + ManagedFieldName(field), field.TypeInfo, Property: property));
             return;
         }
         Documentation(field);
@@ -354,7 +409,7 @@ internal sealed class CSharpGenerator
         Accessor(property.Getter, "get");
         Accessor(property.Setter, "set");
         Close();
-        result.Bindings.Add(new(EmittedBindingKind.Property, field, mapped + " " + Id(field.Name.text), field.TypeInfo, Property: property));
+        result.Bindings.Add(new(EmittedBindingKind.Property, field, mapped + " " + ManagedFieldName(field), field.TypeInfo, Property: property));
         void Accessor(FunctionDescriptor? endpoint, string keyword)
         {
             if (endpoint == null) return;
@@ -371,7 +426,7 @@ internal sealed class CSharpGenerator
         if (function.Binding?.RedeclarationOf != null) return;
         if (function.TypeInfo is not { } signature) { Error(function, "Missing function type information."); return; }
         var deleted = signature.SuffixTokens.SkipWhile(t => t != "=").Skip(1).FirstOrDefault(t => !t.IsTrivia);
-        if (deleted == "delete")
+        if (deleted == "delete" && function.Parent is not TypeDescriptor { Api.NativeInvokeUseName: true })
         {
             Line("// Deleted native declaration omitted: " + Comment(function.Name.text));
             return;
@@ -471,8 +526,9 @@ internal sealed class CSharpGenerator
             else if (signature.SuffixTokens.Any(t => t == "override") && HasExportedOverrideTarget(function)) dispatch = "override ";
             else if (signature.ReturnType?.SpecifierTokens.Any(t => t == "virtual") == true && function.Parent is not TypeDescriptor { IsFinal: true } && function.Parent is not TypeDescriptor { Api.Sealed: true }) dispatch = "virtual ";
         }
+        string pointerContext = returns.Contains('*') || mappedTypes.Any(t => t.Contains('*')) ? "unsafe " : "";
         string head = signature.IsConstructor ? $"{access} {Id(HandleNetCS.SimpleName(function.Parent!))}" :
-            $"{access} {(isStatic ? "static " : dispatch)}{returns} {Id(managedName)}";
+            $"{access} {pointerContext}{(isStatic ? "static " : dispatch)}{returns} {Id(managedName)}";
         string args = "(" + string.Join(", ", managedParameters) + ")";
         int sourceStart = output.Length;
         Line(isInterface ? head + args + ";" : head + args + " => throw new global::System.NotSupportedException(\"Declaration preview; native call generation is not implemented.\");");
@@ -480,6 +536,26 @@ internal sealed class CSharpGenerator
             parameter.Binding!.EffectiveType, parameter.Binding.Direction, parameter.Binding.Passing, mappedTypes[i], emittedParameterNames[i], PointerArrayInterop.Describe(parameter))).ToArray();
         result.Bindings.Add(new(EmittedBindingKind.Function, function, head + args, signature.ReturnType, emittedParameters, accessOverride != null, NativeFunction: signature,
             ManagedSourceStart: sourceStart, ManagedSourceLength: output.Length - sourceStart, ManagedReturnType: returns, CopyReferenceReturn: copyPropertyReturn));
+        if (!isInterface && accessOverride == null && !managedOrder.SequenceEqual(Enumerable.Range(0, parameters.Count)))
+        {
+            string originalKey = managedName + "(" + string.Join(",", keys) + ")";
+            if (originalKey == key)
+                Note(function, "Native-order compatibility overload cannot distinguish this parameter reordering: C# parameter names do not create overloads. Use named arguments for '" + function.NativeQualifiedName + "'.");
+            else
+            {
+                // Distinct parameter names avoid ambiguous all-named calls between
+                // the public reordered API and its positional compatibility overload.
+                var originalNames = Enumerable.Range(0, parameters.Count).Select(i => "__nativeOrder" + i).ToArray();
+                var originalParameters = function.Fields.Select((field, i) => AttributePrefix(field) + mappedTypes[i] + " " + originalNames[i] +
+                    (defaults[i] != null && Enumerable.Range(i, defaults.Length - i).All(j => defaults[j] != null) ? " = " + defaults[i] : ""));
+                string Forward(int i) => (mappedTypes[i].StartsWith("out ") ? "out " : mappedTypes[i].StartsWith("ref ") && !mappedTypes[i].StartsWith("ref readonly ") ? "ref " : mappedTypes[i].StartsWith("in ") || mappedTypes[i].StartsWith("ref readonly ") ? "in " : "") + originalNames[i];
+                string forwarded = string.Join(", ", managedOrder.Select(Forward));
+                string declaration = signature.IsConstructor
+                    ? $"{access} {Id(HandleNetCS.SimpleName(function.Parent!))}({string.Join(", ", originalParameters)}) : this({forwarded}) {{ }}"
+                    : $"{access} {(isStatic ? "static " : "")}{returns} {Id(managedName)}({string.Join(", ", originalParameters)}) => {(returns.StartsWith("ref ") ? "ref " : "")}{Id(managedName)}({forwarded});";
+                nativeOrderOverloads.Add(new(function, signatures, originalKey, declaration));
+            }
+        }
     }
 
     bool HasExportedOverrideTarget(FunctionDescriptor function)
@@ -650,7 +726,13 @@ internal sealed class CSharpGenerator
         if (type is PointerTypeInfo pointer)
         {
             if (pointer.Pointee is UnsupportedTypeInfo) { Error(context, "Unsupported pointer declarator."); return null; }
-            // An address is only an address: never Nullable<T> or an owning object.
+            // Preserve explicitly unmanaged scalar pointers in the engine API.
+            // Unknown/object pointers remain opaque and never gain ownership.
+            if (context.SourceFile?.Converters.DefaultManagedNamespace != null && pointer.Pointee is NamedTypeInfo { Resolution: TypeResolution.Builtin, Converter: null } scalar && scalar.Name != "void")
+            {
+                string? element = Map(scalar, context, false);
+                if (element is "bool" or "byte" or "sbyte" or "short" or "ushort" or "char" or "int" or "uint" or "long" or "ulong" or "float" or "double") return element + "*";
+            }
             return "nint";
         }
         if (type is ReferenceTypeInfo reference)
@@ -775,7 +857,7 @@ internal sealed class CSharpGenerator
             Error(enumeration, "Multiple enum definitions resolve to the same symbol.");
         string? underlying = enumeration.UnderlyingType == null ? "int" : Map(enumeration.UnderlyingType, enumeration, false);
         if (enumeration.UnderlyingType == null && !enumeration.IsScoped)
-            Note(enumeration, "Unscoped enum uses int in the declaration preview; native underlying type is still unresolved and must be established before interop.");
+            Note(enumeration, "Unscoped enum uses generated C# int storage. Native size, alignment and signedness are checked before calls; declare an explicit underlying type if incompatible.");
         if (underlying is not ("sbyte" or "byte" or "short" or "ushort" or "int" or "uint" or "long" or "ulong"))
         { Error(enumeration, "Unsupported enum underlying type."); return; }
         string enumName = CSharpNameValidator.EnumName(enumeration);
@@ -883,13 +965,14 @@ internal sealed class CSharpGenerator
             string read = AutomaticFieldConverters.BufferMethod(field, false), write = AutomaticFieldConverters.BufferMethod(field, true);
             if (!names.Add(read) || !names.Add(write) || owner.Declarations.Any(d => d.Name.text == read || d.Name.text == write))
                 Error(field, "Generated fixed-buffer access helper collides with a declared member.");
-            string ownerName = HandleNetCS.ManagedName(owner), member = Id(field.Name.text);
+            string ownerName = HandleNetCS.ManagedName(owner), member = ManagedFieldName(field);
             Line($"internal static unsafe {element} {read}(in {ownerName} value, int index) {{ if ((uint)index >= {count}U) throw new global::System.ArgumentOutOfRangeException(nameof(index)); fixed ({element}* data = value.{member}.Data) return data[index]; }}");
             Line($"internal static unsafe void {write}(ref {ownerName} value, int index, {element} input) {{ if ((uint)index >= {count}U) throw new global::System.ArgumentOutOfRangeException(nameof(index)); fixed ({element}* data = value.{member}.Data) data[index] = input; }}");
         }
         Note(field, "Array storage uses explicit size/offsets and embedded fixed storage; managed address alignment is not guaranteed by Pack.");
         return Id(name);
     }
+    static string ManagedFieldName(FieldDescriptor field) => Id(field.TypeInfo is ArrayTypeInfo && field.Api.NoArray && field.Api.ManagedAccess == "private" ? "__NativeBuffer_" + field.Name.text : field.Name.text);
     void EmitLayout(NativeStorage storage) => Line($"[global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Explicit, Size = {storage.Size}, Pack = {storage.Alignment}, CharSet = global::System.Runtime.InteropServices.CharSet.Unicode)]");
     void EmitScalarMarshal(string type)
     {

@@ -117,7 +117,7 @@ internal sealed class MarshalAsConverters
                 {
                     if (argument == null) return null;
                     if (StandardConverters.ValueConverter(argument)?.Bodies?.ManagedType is { } managed) return managed;
-                    if (argument is NamedTypeInfo named && Definition(named) is { } declaration && HandleNETcpp.IsScriptingObject(declaration))
+                    if (argument is NamedTypeInfo named && Definition(named) is ClassDescriptor declaration && ExportAttributes.Read(declaration).Export)
                         return HandleNetCS.ManagedName(declaration);
                     return null;
                 }

@@ -6,7 +6,7 @@ namespace VETools.Generation;
 // existing cached-type and pooled/owned-array marshallers.
 internal static class RuntimeHandleInterop
 {
-    internal enum HandleKind { Array, Type }
+    internal enum HandleKind { Array, Type, Class }
     public static HandleKind? Kind(TypeInfo? type)
     {
         if (type is not PointerTypeInfo { Qualifiers: TypeQualifiers.None, Pointee: NamedTypeInfo named } ||
@@ -28,6 +28,7 @@ internal static class RuntimeHandleInterop
         {
             "MArray" or "DotNetArray" => HandleKind.Array,
             "MType" or "DotNetType" => HandleKind.Type,
+            "MClass" => HandleKind.Class,
             _ => null
         };
     }
@@ -53,7 +54,7 @@ internal static class RuntimeHandleInterop
     public static string Return(HandleKind kind, string value, Func<string, string> unique,
         List<string> init, List<string> setup, List<string> cleanup)
     {
-        if (kind == HandleKind.Type) return "global::FlaxEngine.Interop.SystemTypeMarshaller.ConvertToManaged(" + value + ")";
+        if (kind is HandleKind.Type or HandleKind.Class) return "global::FlaxEngine.Interop.SystemTypeMarshaller.ConvertToManaged(" + value + ")";
         string state = unique("__arrayResult");
         init.Add("global::FlaxEngine.Interop.SystemArrayMarshaller.NativeToManaged " + state + " = default;");
         setup.Add(state + ".FromUnmanaged(" + value + ");"); cleanup.Add(state + ".Free();");

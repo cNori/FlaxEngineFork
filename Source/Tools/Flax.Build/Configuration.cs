@@ -181,6 +181,9 @@ namespace Flax.Build
         [CommandLine("bindingsGenerator", "V2/Legacy", "Selects binding call generation. V2 is the default; native scripting registration is retained.")]
         public static string BindingsGenerator = "V2";
 
+        [CommandLine("nativeReflection", "Generate native field/type reflection headers alongside V2 bindings.")]
+        public static bool NativeReflection = true;
+
         /// <summary>
         /// Generates Visual Studio 2015 project format files. Valid only with -genproject option.
         /// </summary>
@@ -264,6 +267,7 @@ namespace Flax.Build
                 !string.Equals(BindingsGenerator, "Legacy", System.StringComparison.OrdinalIgnoreCase))
                 throw new System.ArgumentException("Unknown bindingsGenerator value. Expected V2 or Legacy.");
             cmdLine += " -bindingsGenerator=" + BindingsGenerator;
+            cmdLine += " -nativeReflection=" + (NativeReflection ? "true" : "false");
             if (!string.IsNullOrEmpty(Compiler))
                 cmdLine += " -compiler=" + Compiler;
             if (!string.IsNullOrEmpty(Dotnet))

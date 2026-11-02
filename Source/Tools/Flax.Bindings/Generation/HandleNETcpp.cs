@@ -101,7 +101,9 @@ internal static class HandleNETcpp
         if (type is ReferenceTypeInfo r) type = r.Referent;
         bool pointer = type is PointerTypeInfo;
         if (type is PointerTypeInfo p) type = p.Pointee;
-        return type is NamedTypeInfo { Symbol.Definition: TypeDescriptor cls } && (IsScriptingObject(cls) || IsScriptingInterface(cls))
+        // Unexported native subclasses have no managed identity of their own.
+        // Inherited ScriptingObject storage does not make an abstract managed base instantiable.
+        return type is NamedTypeInfo { Symbol.Definition: TypeDescriptor cls } && (cls.Api.Export || IsRoot(cls) || ManagedBases(cls).FirstOrDefault() is { Api.Abstract: false }) && (IsScriptingObject(cls) || IsScriptingInterface(cls))
             ? new(cls, pointer, reference && pointer, reference) : null;
     }
 

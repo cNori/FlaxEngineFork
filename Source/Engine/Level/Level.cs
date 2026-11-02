@@ -14,7 +14,7 @@ namespace FlaxEngine
         public static bool ChangeSceneAsync(Guid sceneAssetId)
         {
             UnloadAllScenesAsync();
-            return Internal_LoadSceneAsync(ref sceneAssetId);
+            return LoadSceneAsync(in sceneAssetId);
         }
 
         /// <summary>
@@ -34,7 +34,7 @@ namespace FlaxEngine
         /// <returns>True if action fails (given asset is not a scene asset, missing data, scene loading error), otherwise false.</returns>
         public static bool LoadScene(SceneReference sceneAsset)
         {
-            return Internal_LoadScene(ref sceneAsset.ID);
+            return LoadScene(in sceneAsset.ID);
         }
 
         /// <summary>
@@ -44,7 +44,7 @@ namespace FlaxEngine
         /// <returns>True if failed (given asset is not a scene asset, missing data), otherwise false.</returns>
         public static bool LoadSceneAsync(SceneReference sceneAsset)
         {
-            return Internal_LoadSceneAsync(ref sceneAsset.ID);
+            return LoadSceneAsync(in sceneAsset.ID);
         }
 
         /// <summary>
@@ -57,7 +57,7 @@ namespace FlaxEngine
         /// <returns>True if preloading cannot be done, otherwise false.</returns>
         public static bool PreloadSceneAsync(SceneReference sceneAsset)
         {
-            return Internal_PreloadSceneAsync(ref sceneAsset.ID);
+            return PreloadSceneAsync(in sceneAsset.ID);
         }
 
         /// <summary>
@@ -67,7 +67,7 @@ namespace FlaxEngine
         /// <returns>True if action cannot be done, otherwise false.</returns>
         public static bool UnloadScene(SceneReference sceneAsset)
         {
-            return Internal_UnloadScene(ref sceneAsset.ID);
+            return UnloadScene(in sceneAsset.ID);
         }
 
         /// <summary>

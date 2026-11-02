@@ -2,6 +2,8 @@
 
 #pragma once
 
+template<typename T> struct VETReflectionAccess;
+
 #include "Types.h"
 #include "Engine/Core/Types/StringView.h"
 #include "Engine/Core/Types/Guid.h"
@@ -380,6 +382,7 @@ struct ScriptingObjectSpawnParams
     public: \
     friend class type##Internal; \
     friend struct ::VETBindingAccess<type>; \
+    friend struct ::VETReflectionAccess<type>; \
     static ScriptingTypeInitializer TypeInitializer; \
     FORCE_INLINE static const ScriptingType& GetStaticType() { return TypeInitializer.GetType(); } \
     FORCE_INLINE static MClass* GetStaticClass() { return TypeInitializer.GetType().ManagedClass; }
@@ -391,6 +394,7 @@ struct ScriptingObjectSpawnParams
     public: \
     friend class type##Internal; \
     friend struct ::VETBindingAccess<type>; \
+    friend struct ::VETReflectionAccess<type>; \
     static ScriptingTypeInitializer TypeInitializer; \
     FORCE_INLINE static const ScriptingType& GetStaticType() { return TypeInitializer.GetType(); } \
     FORCE_INLINE static MClass* GetStaticClass() { return TypeInitializer.GetType().ManagedClass; }

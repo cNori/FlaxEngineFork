@@ -4,6 +4,7 @@
 
 #include "Engine/Core/Collections/Array.h"
 
+class Actor;
 class NavMesh;
 class NavMeshBoundsVolume;
 

@@ -183,7 +183,7 @@ namespace FlaxEditor.Actions
                 {
                     var obj = Object.Find<SceneObject>(ref _idsForPrefab[i]);
                     if (obj != null && _prefabIds[i] != Guid.Empty)
-                        SceneObject.Internal_LinkPrefab(Object.GetUnmanagedPtr(obj), ref _prefabIds[i], ref _prefabObjectIds[i]);
+                        obj.LinkPrefab(in _prefabIds[i], in _prefabObjectIds[i]);
                 }
             }
         }

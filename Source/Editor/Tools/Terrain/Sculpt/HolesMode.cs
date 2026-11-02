@@ -54,7 +54,7 @@ namespace FlaxEditor.Tools.Terrain.Sculpt
             Profiler.EndEvent();
 
             // Update terrain patch
-            TerrainTools.ModifyHolesMask(p.Terrain, ref p.PatchCoord, tempBuffer, ref p.ModifiedOffset, ref p.ModifiedSize);
+            TerrainTools.ModifyHolesMask(p.Terrain, ref p.PatchCoord, (nint)tempBuffer, ref p.ModifiedOffset, ref p.ModifiedSize);
         }
     }
 }

@@ -219,7 +219,7 @@ namespace FlaxEditor.Windows.Profiler
 
             double scale = 100.0;
             float width = (float)(e.Time * scale);
-            string name = new string(e.Name);
+            string name = System.Runtime.InteropServices.Marshal.PtrToStringUni(e.Name);
 
             Timeline.Event control;
             if (_timelineEventsCache.Count != 0)
@@ -362,7 +362,7 @@ namespace FlaxEditor.Windows.Profiler
             for (int i = 0; i < data.Length; i++)
             {
                 var e = data[i];
-                string name = new string(e.Name);
+                string name = System.Runtime.InteropServices.Marshal.PtrToStringUni(e.Name);
 
                 Row row;
                 if (_tableRowsCache.Count != 0)

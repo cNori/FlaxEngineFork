@@ -20,14 +20,14 @@ namespace FlaxEngine
             {
                 get
                 {
-                    fixed (short* name = Name0)
+                    fixed (char* name = __NativeBuffer_Name.Data)
                         return new string((char*)name);
                 }
             }
 
             internal unsafe bool NameStartsWith(string prefix)
             {
-                fixed (short* name = Name0)
+                fixed (char* name = __NativeBuffer_Name.Data)
                 {
                     fixed (char* p = prefix)
                         return Utils.MemoryCompare(new IntPtr(name), new IntPtr(p), (ulong)(prefix.Length * 2)) == 0;

@@ -15,7 +15,7 @@ namespace FlaxEngine
         {
             get
             {
-                IntPtr ptr = Internal_GetResourcesInternal(__unmanagedPtr);
+                IntPtr ptr = Internal_GetResourcesInternal();
                 ManagedArray array = Unsafe.As<ManagedArray>(ManagedHandle.FromIntPtr(ptr).Target);
                 return NativeInterop.GCHandleArrayToManagedArray<GPUResource>(array);
             }
@@ -29,7 +29,7 @@ namespace FlaxEngine
         public void GetResources(ref GPUResource[] buffer, out int count)
         {
             count = 0;
-            IntPtr ptr = Internal_GetResourcesInternal(__unmanagedPtr);
+            IntPtr ptr = Internal_GetResourcesInternal();
             ManagedArray array = Unsafe.As<ManagedArray>(ManagedHandle.FromIntPtr(ptr).Target);
             buffer = NativeInterop.GCHandleArrayToManagedArray<GPUResource>(array, buffer);
             count = buffer.Length;

@@ -12,7 +12,7 @@ namespace FlaxEngine
         /// <param name="transform">The transformation to apply.</param>
         public static void PushTransform(Matrix3x3 transform)
         {
-            Internal_PushTransform(ref transform);
+            PushTransform(in transform);
         }
 
         /// <summary>
@@ -21,7 +21,7 @@ namespace FlaxEngine
         /// <param name="clipRect">The axis aligned clipping mask rectangle.</param>
         public static void PushClip(Rectangle clipRect)
         {
-            Internal_PushClip(ref clipRect);
+            PushClip(in clipRect);
         }
 
         /// <summary>
@@ -32,7 +32,7 @@ namespace FlaxEngine
         public static void DrawTexture(GPUTextureView rt, Rectangle rect)
         {
             var color = Color.White;
-            Internal_DrawTexture(FlaxEngine.Object.GetUnmanagedPtr(rt), ref rect, ref color);
+            DrawTexture(rt, in rect, in color);
         }
 
         /// <summary>
@@ -43,7 +43,7 @@ namespace FlaxEngine
         public static void DrawTexture(GPUTexture t, Rectangle rect)
         {
             var color = Color.White;
-            Internal_DrawTexture1(FlaxEngine.Object.GetUnmanagedPtr(t), ref rect, ref color);
+            DrawTexture(t, in rect, in color);
         }
 
         /// <summary>
@@ -54,7 +54,7 @@ namespace FlaxEngine
         public static void DrawTexture(TextureBase t, Rectangle rect)
         {
             var color = Color.White;
-            Internal_DrawTexture2(FlaxEngine.Object.GetUnmanagedPtr(t), ref rect, ref color);
+            DrawTexture(t, in rect, in color);
         }
 
         /// <summary>
@@ -75,7 +75,7 @@ namespace FlaxEngine
         public static void DrawTexturePoint(GPUTexture t, Rectangle rect)
         {
             var color = Color.White;
-            Internal_DrawTexturePoint(FlaxEngine.Object.GetUnmanagedPtr(t), ref rect, ref color);
+            DrawTexturePoint(t, in rect, in color);
         }
 
         /// <summary>
@@ -96,7 +96,7 @@ namespace FlaxEngine
         public static void DrawMaterial(MaterialBase material, Rectangle rect)
         {
             var color = Color.White;
-            Internal_DrawMaterial(FlaxEngine.Object.GetUnmanagedPtr(material), ref rect, ref color);
+            DrawMaterial(material, in rect, in color);
         }
 
         /// <summary>

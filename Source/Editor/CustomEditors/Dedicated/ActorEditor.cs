@@ -522,7 +522,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
                 var restored = actor.AddScript(removed.PrefabObject.GetType());
                 var prefabId = actor.PrefabID;
                 var prefabObjectId = restored.PrefabObjectID;
-                Script.Internal_LinkPrefab(FlaxEngine.Object.GetUnmanagedPtr(restored), ref prefabId, ref prefabObjectId);
+                restored.LinkPrefab(in prefabId, in prefabObjectId);
                 string data = JsonSerializer.Serialize(removed.PrefabObject);
                 JsonSerializer.Deserialize(restored, data);
 
@@ -544,7 +544,7 @@ namespace FlaxEditor.CustomEditors.Dedicated
                 string data = JsonSerializer.Serialize(removedActor.PrefabObject);
                 JsonSerializer.Deserialize(restored, data);
                 Presenter.Owner.SceneContext.Spawn(restored, parentActor, removedActor.OrderInParent);
-                Actor.Internal_LinkPrefab(FlaxEngine.Object.GetUnmanagedPtr(restored), ref prefabId, ref prefabObjectId);
+                restored.LinkPrefab(in prefabId, in prefabObjectId);
                 return;
             }
 

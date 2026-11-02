@@ -67,13 +67,16 @@ internal sealed class StandardConverters
             if (!ExportAttributes.Read(enumeration).Export) return;
             if (!enums.TryGetValue(enumeration, out var converter))
             {
-                var scalar = enumeration.UnderlyingType == null ? enumeration.IsScoped ? new Scalar("int", "int", 4) : null : Primitive(enumeration.UnderlyingType);
+                var scalar = enumeration.UnderlyingType == null ? new Scalar("int", "int", 4) : Primitive(enumeration.UnderlyingType);
                 if (scalar == null || scalar.CS is "bool" or "char") return;
                 string native = "::" + enumeration.QualifiedName, managed = HandleNetCS.ManagedName(enumeration);
                 converter = new() { NativeName = enumeration.QualifiedName, NativeCppType = native, AbiCppType = scalar.Cpp, EnumValue = true, SharedReference = true,
                     NativeDefault = native + "{}", DefinitionHeaders = enumeration.SourceFile?.Path is { } path ? [path] : [],
                     ToAbi = value => $"static_cast<{scalar.Cpp}>({value})", ToNative = value => $"static_cast<{native}>({value})",
                     Bodies = new() { ManagedType = managed, ManagedAbiType = scalar.CS,
+                        NativeRequirements = new() { Includes = ["<type_traits>"], EnumLayoutChecks = new Dictionary<string, string> {
+                            [native] = $"sizeof({native}) == sizeof({scalar.Cpp}) && alignof({native}) == alignof({scalar.Cpp}) && std::is_signed<typename std::underlying_type<{native}>::type>::value == std::is_signed<{scalar.Cpp}>::value"
+                        } },
                         ManagedToAbi = c => new($"({scalar.CS})({c.Value})"), AbiToManaged = c => new($"({managed})({c.Value})"),
                         AbiToNative = c => new($"static_cast<{native}>({c.Value})"), NativeToAbi = c => new($"static_cast<{scalar.Cpp}>({c.Value})") } };
                 enums.Add(enumeration, converter);

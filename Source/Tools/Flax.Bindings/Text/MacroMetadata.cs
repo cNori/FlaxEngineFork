@@ -8,6 +8,7 @@ internal sealed record MacroInvocation(Token Name, IReadOnlyList<List<Token>> Ar
 // these binding options changes the native type's cv/access qualifiers.
 internal sealed class ApiBindingOptions
 {
+    public bool AutoSerialization;
     public bool Export, Property, ReadOnly, Template, Alias, NoDefault, NoPod, NoSpawn, NoProxy, NoConstructor, InBuild, NoArray, Event, Hidden;
     public List<Token> MarshalAsTokens = [];
     public List<Token>? DefaultValueTokens;
@@ -168,8 +169,8 @@ internal static class MacroMetadata
                 if (!ApiNames.Contains(macro)) { metadata.Errors.Add(new("Unknown API annotation macro '" + macro + "'.", invocation.Name)); continue; }
                 if (macro == "API_AUTO_SERIALIZATION")
                 {
-                    metadata.Warnings.Add(new("API_AUTO_SERIALIZATION is preserved but skipped by V2; reflection-based serialization generation is not implemented yet.",
-                        invocation.Name, LogEntryType.Warning, "VETP004"));
+                    if (declaration.Parent is TypeDescriptor owner) owner.Api.Binding.AutoSerialization = true;
+                    else metadata.Errors.Add(new("API_AUTO_SERIALIZATION requires a class or struct owner.", invocation.Name));
                     continue;
                 }
                 if (macro == "API_INJECT_CODE")

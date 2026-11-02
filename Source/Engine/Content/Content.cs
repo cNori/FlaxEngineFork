@@ -201,7 +201,7 @@ namespace FlaxEngine
         /// <returns>Asset instance if created, null otherwise. See log for error message if need to.</returns>
         public static T CreateVirtualAsset<T>() where T : Asset
         {
-            return (T)Internal_CreateVirtualAsset(typeof(T));
+            return (T)CreateVirtualAsset(typeof(T));
         }
     }
 }

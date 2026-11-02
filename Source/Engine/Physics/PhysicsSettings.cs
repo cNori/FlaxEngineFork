@@ -17,7 +17,7 @@ namespace FlaxEditor.Content.Settings
         /// <summary>
         /// Initializes a new instance of the <see cref="PhysicsSettings"/> class.
         /// </summary>
-        public PhysicsSettings()
+        public PhysicsSettings() : this(__CreateNativeDefault())
         {
             for (int i = 0; i < 32; i++)
             {

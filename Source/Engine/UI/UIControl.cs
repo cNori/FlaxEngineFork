@@ -208,16 +208,16 @@ namespace FlaxEngine
         {
             get
             {
-                Internal_GetNavTargets(__unmanagedPtr, out UIControl up, out _, out _, out _);
+                Internal_GetNavTargets(out UIControl up, out _, out _, out _);
                 return up;
             }
             set
             {
-                Internal_GetNavTargets(__unmanagedPtr, out UIControl up, out UIControl down, out UIControl left, out UIControl right);
+                Internal_GetNavTargets(out UIControl up, out UIControl down, out UIControl left, out UIControl right);
                 if (up == value)
                     return;
                 up = value;
-                Internal_SetNavTargets(__unmanagedPtr, GetUnmanagedPtr(up), GetUnmanagedPtr(down), GetUnmanagedPtr(left), GetUnmanagedPtr(right));
+                Internal_SetNavTargets(up, down, left, right);
                 if (_control != null)
                     _control.NavTargetUp = value != null ? value.Control : null;
             }
@@ -232,16 +232,16 @@ namespace FlaxEngine
         {
             get
             {
-                Internal_GetNavTargets(__unmanagedPtr, out _, out UIControl down, out _, out _);
+                Internal_GetNavTargets(out _, out UIControl down, out _, out _);
                 return down;
             }
             set
             {
-                Internal_GetNavTargets(__unmanagedPtr, out UIControl up, out UIControl down, out UIControl left, out UIControl right);
+                Internal_GetNavTargets(out UIControl up, out UIControl down, out UIControl left, out UIControl right);
                 if (down == value)
                     return;
                 down = value;
-                Internal_SetNavTargets(__unmanagedPtr, GetUnmanagedPtr(up), GetUnmanagedPtr(down), GetUnmanagedPtr(left), GetUnmanagedPtr(right));
+                Internal_SetNavTargets(up, down, left, right);
                 if (_control != null)
                     _control.NavTargetDown = value != null ? value.Control : null;
             }
@@ -256,16 +256,16 @@ namespace FlaxEngine
         {
             get
             {
-                Internal_GetNavTargets(__unmanagedPtr, out _, out _, out UIControl left, out _);
+                Internal_GetNavTargets(out _, out _, out UIControl left, out _);
                 return left;
             }
             set
             {
-                Internal_GetNavTargets(__unmanagedPtr, out UIControl up, out UIControl down, out UIControl left, out UIControl right);
+                Internal_GetNavTargets(out UIControl up, out UIControl down, out UIControl left, out UIControl right);
                 if (left == value)
                     return;
                 left = value;
-                Internal_SetNavTargets(__unmanagedPtr, GetUnmanagedPtr(up), GetUnmanagedPtr(down), GetUnmanagedPtr(left), GetUnmanagedPtr(right));
+                Internal_SetNavTargets(up, down, left, right);
                 if (_control != null)
                     _control.NavTargetLeft = value != null ? value.Control : null;
             }
@@ -280,16 +280,16 @@ namespace FlaxEngine
         {
             get
             {
-                Internal_GetNavTargets(__unmanagedPtr, out _, out _, out _, out UIControl right);
+                Internal_GetNavTargets(out _, out _, out _, out UIControl right);
                 return right;
             }
             set
             {
-                Internal_GetNavTargets(__unmanagedPtr, out UIControl up, out UIControl down, out UIControl left, out UIControl right);
+                Internal_GetNavTargets(out UIControl up, out UIControl down, out UIControl left, out UIControl right);
                 if (right == value)
                     return;
                 right = value;
-                Internal_SetNavTargets(__unmanagedPtr, GetUnmanagedPtr(up), GetUnmanagedPtr(down), GetUnmanagedPtr(left), GetUnmanagedPtr(right));
+                Internal_SetNavTargets(up, down, left, right);
                 if (_control != null)
                     _control.NavTargetRight = value != null ? value.Control : null;
             }
@@ -408,7 +408,7 @@ namespace FlaxEngine
             control.IndexInParent = OrderInParent;
 
             // Setup navigation (all referenced controls are now loaded)
-            Internal_GetNavTargets(__unmanagedPtr, out UIControl up, out UIControl down, out UIControl left, out UIControl right);
+            Internal_GetNavTargets(out UIControl up, out UIControl down, out UIControl left, out UIControl right);
             control.NavTargetUp = up?.Control;
             control.NavTargetDown = down?.Control;
             control.NavTargetLeft = left?.Control;

@@ -48,7 +48,7 @@ public:
     /// <summary>
     /// The type of the network driver (implements INetworkDriver) that will be used to create, manage, send and receive messages over the network.
     /// </summary>
-    API_FIELD(Attributes="EditorOrder(1100), EditorDisplay(\"Transport\"), TypeReference(typeof(INetworkDriver)), CustomEditorAlias(\"FlaxEditor.CustomEditors.Editors.TypeNameEditor\")")
+    API_FIELD(Attributes="EditorOrder(1100), EditorDisplay(\"Transport\"), TypeReference(typeof(global::FlaxEngine.Networking.INetworkDriver)), CustomEditorAlias(\"FlaxEditor.CustomEditors.Editors.TypeNameEditor\")")
     StringAnsi NetworkDriver = "FlaxEngine.Networking.ENetDriver";
 
 public:

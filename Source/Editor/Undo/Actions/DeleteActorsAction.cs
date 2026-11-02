@@ -204,7 +204,7 @@ namespace FlaxEditor.Actions
                     Guid prefabId = _prefabIds[i];
                     if (prefabId != Guid.Empty)
                     {
-                        Actor.Internal_LinkPrefab(FlaxEngine.Object.GetUnmanagedPtr(actors[i]), ref prefabId, ref _prefabObjectIds[i]);
+                        actors[i].LinkPrefab(in prefabId, in _prefabObjectIds[i]);
                     }
                 }
             }

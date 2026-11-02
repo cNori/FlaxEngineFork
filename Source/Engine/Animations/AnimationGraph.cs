@@ -127,8 +127,8 @@ namespace FlaxEngine
                         BoxId = managed.BoxId,
                         DeltaTime = managed.DeltaTime,
                         CurrentFrameIndex = managed.CurrentFrameIndex,
-                        BaseModel = SkinnedModelMarshaller.ConvertToManaged(managed.BaseModel),
-                        Instance = AnimatedModelMarshaller.ConvertToManaged(managed.Instance),
+                        BaseModel = (SkinnedModel)Object.FromUnmanagedPtr(managed.BaseModel),
+                        Instance = (AnimatedModel)Object.FromUnmanagedPtr(managed.Instance),
                     };
                 }
 
@@ -143,8 +143,8 @@ namespace FlaxEngine
                         BoxId = managed.BoxId,
                         DeltaTime = managed.DeltaTime,
                         CurrentFrameIndex = managed.CurrentFrameIndex,
-                        BaseModel = SkinnedModelMarshaller.ConvertToUnmanaged(managed.BaseModel),
-                        Instance = AnimatedModelMarshaller.ConvertToUnmanaged(managed.Instance),
+                        BaseModel = Object.GetUnmanagedPtr(managed.BaseModel),
+                        Instance = Object.GetUnmanagedPtr(managed.Instance),
                     };
                 }
 

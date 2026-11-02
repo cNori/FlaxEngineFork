@@ -7,7 +7,7 @@
 /// <summary>
 /// Base class for all global settings containers for the engine. Helps to apply, store and expose properties to engine/game.
 /// </summary>
-API_CLASS(Abstract) class FLAXENGINE_API SettingsBase : public ISerializable
+API_CLASS(Abstract, Namespace="FlaxEditor.Content.Settings") class FLAXENGINE_API SettingsBase : public ISerializable
 {
     DECLARE_SCRIPTING_TYPE_MINIMAL(SettingsBase);
 public:

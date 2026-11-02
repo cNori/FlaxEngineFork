@@ -2,7 +2,7 @@
 
 namespace FlaxEngine
 {
-    unsafe partial struct PixelFormatSampler
+    public unsafe partial struct PixelFormatSampler
     {
         /// <summary>
         /// Element format.

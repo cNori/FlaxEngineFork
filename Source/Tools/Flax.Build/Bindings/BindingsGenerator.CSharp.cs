@@ -375,7 +375,7 @@ namespace Flax.Build.Bindings
                 return string.Format("System.Collections.Generic.HashSet<{0}>", GenerateCSharpNativeToManaged(buildData, typeInfo.GenericArgs[0], caller, marshalling));
 
             // BitArray
-            if (typeInfo.Type == "BitArray" && typeInfo.GenericArgs != null)
+            if (typeInfo.Type == "BitArray")
                 return "bool[]";
 
             // BytesContainer

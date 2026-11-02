@@ -32,7 +32,7 @@ namespace FlaxEngine
             if (triangles.Length == 0 || triangles.Length % 3 != 0)
                 throw new ArgumentOutOfRangeException(nameof(triangles));
 
-            if (Internal_UpdateTrianglesUInt(__unmanagedPtr, triangles.Length / 3, triangles))
+            if (Internal_UpdateTrianglesUInt(triangles.Length / 3, triangles))
                 throw new Exception("Failed to update mesh data.");
         }
 
@@ -51,7 +51,7 @@ namespace FlaxEngine
             if (triangles.Count == 0 || triangles.Count % 3 != 0)
                 throw new ArgumentOutOfRangeException(nameof(triangles));
 
-            if (Internal_UpdateTrianglesUInt(__unmanagedPtr, triangles.Count / 3, Utils.ExtractArrayFromList(triangles)))
+            if (Internal_UpdateTrianglesUInt(triangles.Count / 3, Utils.ExtractArrayFromList(triangles)))
                 throw new Exception("Failed to update mesh data.");
         }
 
@@ -70,7 +70,7 @@ namespace FlaxEngine
             if (triangles.Length == 0 || triangles.Length % 3 != 0)
                 throw new ArgumentOutOfRangeException(nameof(triangles));
 
-            if (Internal_UpdateTrianglesUShort(__unmanagedPtr, triangles.Length / 3, triangles))
+            if (Internal_UpdateTrianglesUShort(triangles.Length / 3, triangles))
                 throw new Exception("Failed to update mesh data.");
         }
 
@@ -89,7 +89,7 @@ namespace FlaxEngine
             if (triangles.Count == 0 || triangles.Count % 3 != 0)
                 throw new ArgumentOutOfRangeException(nameof(triangles));
 
-            if (Internal_UpdateTrianglesUShort(__unmanagedPtr, triangles.Count / 3, Utils.ExtractArrayFromList(triangles)))
+            if (Internal_UpdateTrianglesUShort(triangles.Count / 3, Utils.ExtractArrayFromList(triangles)))
                 throw new Exception("Failed to update mesh data.");
         }
 
@@ -101,7 +101,7 @@ namespace FlaxEngine
         /// <returns>The gathered data.</returns>
         public uint[] DownloadIndexBuffer(bool forceGpu = false)
         {
-            var result = (uint[])Internal_DownloadIndexBuffer(__unmanagedPtr, forceGpu, typeof(uint), false);
+            var result = (uint[])Internal_DownloadIndexBuffer(forceGpu, typeof(uint), false);
             if (result == null)
                 throw new Exception("Failed to download mesh data.");
             return result;
@@ -115,7 +115,7 @@ namespace FlaxEngine
         /// <returns>The gathered data.</returns>
         public ushort[] DownloadIndexBufferUShort(bool forceGpu = false)
         {
-            var result = (ushort[])Internal_DownloadIndexBuffer(__unmanagedPtr, forceGpu, typeof(ushort), true);
+            var result = (ushort[])Internal_DownloadIndexBuffer(forceGpu, typeof(ushort), true);
             if (result == null)
                 throw new Exception("Failed to download mesh data.");
             return result;
@@ -138,12 +138,10 @@ namespace FlaxEngine
             var count = types.Length;
             fixed (MeshBufferType* typesPtr = types)
             {
-                if (Internal_DownloadData(__unmanagedPtr,
-                                          count, typesPtr,
+                if (Internal_DownloadData(count, (nint)typesPtr,
                                           out byte[] buffer0, out byte[] buffer1, out byte[] buffer2, out byte[] buffer3,
                                           out GPUVertexLayout layout0, out GPUVertexLayout layout1, out GPUVertexLayout layout2, out GPUVertexLayout layout3,
-                                          forceGpu,
-                                          out int __buffer0Count, out int __buffer1Count, out int __buffer2Count, out int __buffer3Count
+                                          forceGpu
                                          ))
                     return true;
                 buffers = new byte[count][];

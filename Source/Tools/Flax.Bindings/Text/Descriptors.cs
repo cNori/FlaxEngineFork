@@ -86,6 +86,7 @@ internal abstract class TypeDescriptor : ScopeDescriptor
 {
     public NativeTypeConverter? AutomaticValueConverter;
     public bool CanonicalManagedValue;
+    public Dictionary<FieldDescriptor, string> PrivateScalarStorage = [];
     public TypeInfo? MarshalAsType;
     public string? MarshalAsError;
     public bool NativeFieldView;
@@ -96,6 +97,7 @@ internal abstract class TypeDescriptor : ScopeDescriptor
     public TypeSymbol? TypeSymbol;
     public bool IsFinal;
     public bool IsForwardDeclaration;
+    public bool HasTrailingDeclarator;
     public List<Token> BaseTokens = [];
     public List<BaseTypeInfo> BaseTypes = [];
     public List<Token> Body = [];
@@ -114,6 +116,7 @@ internal sealed class FunctionDescriptor : DeclarationDescriptor
     public bool IsFieldSetter;
     public bool GeneratedStatic;
     public bool NativeDefaultFactory;
+    public bool NativeConstructorFactoryOnly;
     public InterfaceDescriptor? NativeDispatchInterface;
     public List<Token> NameTokens = [];
     public FunctionTypeInfo? TypeInfo;

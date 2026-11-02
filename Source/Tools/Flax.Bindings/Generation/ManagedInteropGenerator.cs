@@ -45,7 +45,7 @@ internal static class ManagedInteropGenerator
             EnsureNativeView((TypeDescriptor)view.Native, view);
         // Project generation promises this constructor/lifetime ABI to consuming
         // headers. Emit it even for abstract/empty native base wrappers.
-        foreach (var binding in typeBindings.Values.Where(b => b.Native is ClassDescriptor cls && managed.ProjectClassLifetimes.Contains(cls)))
+        foreach (var binding in typeBindings.Values.Where(b => b.Native is ClassDescriptor cls && !cls.Api.Static && cls.MarshalAsType == null && !HandleNETcpp.IsScriptingObject(cls)))
             EnsureHandle((ClassDescriptor)binding.Native, binding);
         foreach (var pair in native.EntryPoints)
         {
@@ -224,6 +224,7 @@ internal static class ManagedInteropGenerator
             body.AppendLine($"            int {status} = global::{imports}.{importName}({string.Join(", ", callArgs)});");
             if (constructor)
                 body.AppendLine($"            if ({value} != 0) {{ {constructorOwner} = new {lifetime}({value}, {release}); {value} = 0; }}");
+            body.AppendLine($"            if ({status} == 3) throw new global::System.InvalidOperationException(\"Native enum underlying type is incompatible with the generated C# backing type. Declare an explicit enum underlying type for this binding: {function.NativeQualifiedName}.\");");
             body.AppendLine($"            if ({status} != 0) throw new global::System.InvalidOperationException(\"Native binding call failed with status \" + {status});");
             if (hasBodies) body.AppendLine($"            {callSucceeded} = true; _ = {callSucceeded};");
             foreach (string line in copyback) body.Append(Indent(line, "            "));
@@ -288,7 +289,10 @@ internal static class ManagedInteropGenerator
                 declarations.Append(Indent(body.ToString(), "    "));
                 string forwarded = string.Join(", ", entry.Parameters!.Select(p =>
                     (p.Passing == ParameterPassing.LValueReference ? p.Direction switch { ParameterDirection.In => "in ", ParameterDirection.Out => "out ", _ => "ref " } : "") + p.ManagedName));
-                body.Clear(); body.AppendLine($"{entry.ManagedDeclaration} : this(global::{imports}.Create{importName}({forwarded})) {{ }}");
+                body.Clear();
+                if (function.NativeConstructorFactoryOnly)
+                    body.AppendLine($"private static {lifetime} __CreateNativeDefault() => global::{imports}.Create{importName}();");
+                else body.AppendLine($"{entry.ManagedDeclaration} : this(global::{imports}.Create{importName}({forwarded})) {{ }}");
             }
             string indentation = new(managed.Source[entry.ManagedSourceStart..].TakeWhile(c => c == ' ').ToArray());
             edits.Add((entry.ManagedSourceStart, entry.ManagedSourceLength, Indent(body.ToString(), indentation)));
@@ -346,7 +350,7 @@ internal static class ManagedInteropGenerator
         }
         result.Source = source.ToString().Replace("// Declaration preview only: no native calls, marshalling or ABI layout guarantees.", "// Native imports wired from the emitted binding manifest; ABI: Windows x64.")
             .Replace("// Method bodies throw; C++ initializers and function implementations are not translated.", "// Native calls execute through generated wrappers; C++ initializers are not translated.");
-        if (native.Events.Count != 0) result.Source += EventInterop.Runtime(suffix);
+        if (native.Events.Count != 0) result.Source += EventInterop.Runtime(suffix, native.Events.Keys.Any(e => e.Native.SourceFile?.Converters.DefaultManagedNamespace is "FlaxEngine" or "FlaxEditor"));
         return result;
         void Error(EmittedBinding binding, string message) => result.Diagnostics.Add(new LogEntry(message, binding.Native.Name, LogEntryType.Error, "VETCS003"));
         bool EnsureNativeView(TypeDescriptor type, EmittedBinding origin)

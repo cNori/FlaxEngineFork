@@ -298,7 +298,29 @@ internal static class EventInterop
             "\n__committed = true; _ = __committed; return 0;\n} catch (global::System.Exception error) { state.Slot.Report(error); return 2; } finally { " + final + " }\n}";
     }
 
-    public static string Runtime(string suffix) => RuntimeSource.Replace("{Runtime}", "__EventRuntime_" + suffix);
+    public static string Runtime(string suffix, bool engineDispatcher = false) => RuntimeSource
+        .Replace("{Runtime}", "__EventRuntime_" + suffix)
+        .Replace("{EngineOwnerState}", engineDispatcher ? "bool engineOwner;" : "")
+        .Replace("{CaptureEngineOwner}", engineDispatcher ? "engineOwner = global::FlaxEngine.Platform.IsInMainThread;" : "")
+        .Replace("{EngineDispatch}", engineDispatcher ? """
+                    // Drain on the owner immediately, including older queued notifications.
+                    bool onOwner, useEngine;
+                    lock (gate) { onOwner = owner == global::System.Threading.Thread.CurrentThread; useEngine = engineOwner; }
+                    if (onOwner) { Pump(1024); return; }
+                    if (useEngine) {
+                        if (global::System.Threading.Interlocked.Exchange(ref posted, 1) != 0) return;
+                        // Queue outside native callback locks; user code runs only on the main update.
+                        global::System.Threading.ThreadPool.QueueUserWorkItem(_ => {
+                            try { global::FlaxEngine.Scripting.InvokeOnUpdate(() => {
+                                global::System.Threading.Interlocked.Exchange(ref posted, 0);
+                                try { Pump(1024); } catch (global::System.Exception e) { Report(e); }
+                            }); } catch (global::System.Exception e) {
+                                global::System.Threading.Interlocked.Exchange(ref posted, 0); Report(e);
+                            }
+                        });
+                        return;
+                    }
+            """ : "");
 
     const string RuntimeSource = """
         namespace Interop {
@@ -309,6 +331,7 @@ internal static class EventInterop
                 readonly global::System.Collections.Generic.Queue<(long Version, T Snapshot, global::System.Action<T> Invoke)> queue = new();
                 global::System.Threading.Thread owner;
                 global::System.Threading.SynchronizationContext context;
+                {EngineOwnerState}
                 T handlers;
                 long version; bool disposed, draining, nativeCancelled, bound; int posted, delivering;
                 internal bool NativeCancelled { get { lock (gate) return nativeCancelled; } }
@@ -324,7 +347,7 @@ internal static class EventInterop
                 void RequireOwner(bool capture, bool allowDisposed = false) {
                     lock (gate) {
                         if (disposed && !allowDisposed) throw new global::System.ObjectDisposedException("Native event bridge");
-                        if (owner == null && capture) { owner = global::System.Threading.Thread.CurrentThread; context = global::System.Threading.SynchronizationContext.Current; }
+                        if (owner == null && capture) { owner = global::System.Threading.Thread.CurrentThread; context = global::System.Threading.SynchronizationContext.Current; {CaptureEngineOwner} }
                         if (owner != null && owner != global::System.Threading.Thread.CurrentThread) throw new global::System.InvalidOperationException("Event subscription and pumping belong to the captured owner thread.");
                     }
                 }
@@ -333,7 +356,7 @@ internal static class EventInterop
                     RequireOwner(false); T snapshot; long captured; bool succeeded = true;
                     lock (gate) { if (disposed || handlers == null) return false; snapshot = handlers; captured = version; }
                     foreach (var item in snapshot.GetInvocationList()) {
-                        lock (gate) { if (disposed || version != captured) { succeeded = false; break; } delivering++; }
+                        lock (gate) { if (disposed || handlers == null) { succeeded = false; break; } delivering++; }
                         try { invoke((T)item); } catch (global::System.Exception error) { succeeded = false; Report(error); }
                         finally { lock (gate) { delivering--; global::System.Threading.Monitor.PulseAll(gate); } }
                     }
@@ -368,6 +391,7 @@ internal static class EventInterop
                     Schedule();
                 }
                 void Schedule() {
+                    {EngineDispatch}
                     global::System.Threading.SynchronizationContext dispatcher;
                     lock (gate) dispatcher = context;
                     if (dispatcher == null || dispatcher.GetType() == typeof(global::System.Threading.SynchronizationContext) || global::System.Threading.Interlocked.Exchange(ref posted, 1) != 0) return;
@@ -387,7 +411,7 @@ internal static class EventInterop
                             (long Version, T Snapshot, global::System.Action<T> Invoke) work;
                             lock (gate) { if (disposed || queue.Count == 0) break; work = queue.Dequeue(); }
                             foreach (var item in work.Snapshot.GetInvocationList()) {
-                                lock (gate) { if (disposed || version != work.Version) break; delivering++; }
+                                lock (gate) { if (disposed || handlers == null) break; delivering++; }
                                 try { work.Invoke((T)item); delivered++; } catch (global::System.Exception e) { Report(e); }
                                 finally { lock (gate) { delivering--; global::System.Threading.Monitor.PulseAll(gate); } }
                             }

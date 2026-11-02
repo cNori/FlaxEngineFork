@@ -36,7 +36,7 @@ namespace FlaxEditor.Tools.Terrain.Undo
         {
             var offset = Int2.Zero;
             var size = new Int2((int)Mathf.Sqrt(_heightmapLength));
-            if (TerrainTools.ModifySplatMap(Terrain, ref patchCoord, (int)tag, (Color32*)data, ref offset, ref size))
+            if (TerrainTools.ModifySplatMap(Terrain, ref patchCoord, (int)tag, (nint)data, ref offset, ref size))
                 throw new Exception("Failed to modify the splatmap.");
         }
     }

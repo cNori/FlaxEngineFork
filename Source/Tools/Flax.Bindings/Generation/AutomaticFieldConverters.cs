@@ -10,7 +10,7 @@ namespace VETools.Generation;
 internal sealed class AutomaticFieldConverters
 {
     sealed record Scalar(string Cpp, string Managed, int Size, TypeInfo? ObjectType = null, NativeTypeConverter? Converter = null, bool RawPointer = false, string? ManagedValueType = null);
-    sealed record Member(FieldDescriptor Field, Scalar? Scalar, Shape? Nested, int ArrayCount = 0);
+    sealed record Member(FieldDescriptor Field, Scalar? Scalar, Shape? Nested, int ArrayCount = 0, string? ManagedAlias = null);
     sealed record Leaf(string Path, Scalar Scalar, int Offset)
     {
         public string? ManagedOverride;
@@ -78,8 +78,11 @@ internal sealed class AutomaticFieldConverters
             var converter = pass.Create(shape, pass.Declarations(shape));
             pass.converters.Add(shape.Type, converter); shape.Type.AutomaticValueConverter = converter;
         }
+        foreach (var type in types.Where(t => !pass.converters.ContainsKey(t)))
+            if (PrivateScalarValueConverters.Create(type) is { } privateConverter)
+            { pass.converters.Add(type, privateConverter); type.AutomaticValueConverter = privateConverter; }
         foreach (var declaration in files.SelectMany(TemplateInstantiationPass.Declarations).Concat(root.TypeInfos!.TemplateInstances.Values.SelectMany(TemplateInstantiationPass.Declarations)))
-            foreach (var type in TemplateInstantiationPass.Types(declaration)) pass.Attach(type);
+            foreach (var type in TemplateInstantiationPass.Types(declaration)) pass.Attach(type, declaration.SourceFile?.Converters);
         return pass.attached;
     }
 
@@ -125,7 +128,7 @@ internal sealed class AutomaticFieldConverters
                         if (shape.Leaves.Count + (long)recordCount * record.Leaves.Count > 4096 || shape.Size + (long)recordCount * record.Size > 65536) return null;
                         if (Enumerable.Range(0, recordCount).Any(i => fields.Any(other => other != field && other.Name.text == field.Name.text + i))) return null;
                         shape.FlattenedArrays = true;
-                        shape.Members.Add(new(field, null, record, recordCount));
+                        shape.Members.Add(new(field, null, record, recordCount, type.SourceFile?.Converters.ManagedValueAlias(array.ElementType)));
                         for (int i = 0; i < recordCount; i++)
                             foreach (var leaf in record.Leaves)
                             {
@@ -167,7 +170,7 @@ internal sealed class AutomaticFieldConverters
                 if (scalar == null && nested == null) return null;
                 if (nested != null && (shape.Size + nested.Size > 65536 ||
                     (shape.HasInlineArrays || nested.HasInlineArrays) && shape.Leaves.Count + nested.Leaves.Count > 4096)) return null;
-                shape.Members.Add(new(field, scalar, nested));
+                shape.Members.Add(new(field, scalar, nested, ManagedAlias: type.SourceFile?.Converters.ManagedValueAlias(field.TypeInfo!)));
                 if (scalar != null) { shape.Leaves.Add(new(Id(field.Name.text), scalar, shape.Size) {
                     AccessField = field.Api.ManagedAccess == "private" ? field : null }); shape.Size = checked(shape.Size + scalar.Size); }
                 else foreach (var leaf in nested!.Leaves)
@@ -240,6 +243,8 @@ internal sealed class AutomaticFieldConverters
         string native = string.Concat(type.NamespaceTokens.Select(t => t.text)).Replace("::", ".");
         string prefix = (type.ConcreteTemplate?.Definition.SourceFile ?? type.SourceFile)?.IncludeNamespace ?? "VETools.Values";
         if (prefix.Length == 0) prefix = "Values"; // A root header still needs a namespace distinct from its native access view.
+        if (type.SourceFile?.Converters.DefaultManagedNamespace is { Length: > 0 } managedRoot)
+            prefix = managedRoot + ".Values." + prefix;
         return string.Join(".", new[] { prefix, native, enclosing }.Where(s => s.Length != 0));
     }
     static string SnapshotName(TypeDescriptor type) => "global::" +
@@ -356,12 +361,13 @@ internal sealed class AutomaticFieldConverters
             StringBuilder code = new();
             string fullName=shape.DataManaged.Replace("global::", "");
             string name=Id(fullName[(fullName.LastIndexOf('.')+1)..]);
-            code.AppendLine($"/// <summary>Field-by-field value snapshot; owns no native object.</summary>\npublic partial struct {name} {{");
+            string access = shape.Type.CanonicalManagedValue ? shape.Type.Api.ManagedAccess ?? "public" : "public";
+            code.AppendLine($"/// <summary>Field-by-field value snapshot; owns no native object.</summary>\n{access} partial {(shape.Type is ClassDescriptor ? "class" : "struct")} {name} {{");
             foreach (var member in shape.Members)
                 for (int i = 0; i < Math.Max(1, member.ArrayCount); i++)
                 {
                     foreach (string attribute in member.Field.Api.ManagedAttributes.Distinct(StringComparer.Ordinal)) code.AppendLine("    [" + attribute + "]");
-                    code.AppendLine($"    {(member.Field.Api.ManagedAccess == "internal" ? "internal" : "public")} {(member.Scalar?.ObjectType is { } obj ? HandleNetCS.ObjectType(obj) : member.Scalar?.Converter?.Bodies?.ManagedType ?? member.Scalar?.ManagedValueType ?? member.Scalar?.Managed ?? member.Nested!.DataManaged)} {Id(member.Field.Name.text + (member.ArrayCount == 0 ? "" : i.ToString(System.Globalization.CultureInfo.InvariantCulture)))};");
+                    code.AppendLine($"    {(member.Field.Api.ManagedAccess == "internal" ? "internal" : "public")} {(member.ManagedAlias ?? (member.Scalar?.ObjectType is { } obj ? HandleNetCS.ObjectType(obj) : member.Scalar?.Converter?.Bodies?.ManagedType ?? member.Scalar?.ManagedValueType ?? member.Scalar?.Managed ?? member.Nested!.DataManaged))} {Id(member.Field.Name.text + (member.ArrayCount == 0 ? "" : i.ToString(System.Globalization.CultureInfo.InvariantCulture)))};");
                 }
             code.AppendLine("}");
             declarations.Add(WrapValue(shape, code.ToString(), shape.DataManaged));
@@ -403,13 +409,13 @@ internal sealed class AutomaticFieldConverters
             ManagedDeclarations = declarations, DefinitionHeaders = headers.ToArray(), ToAbi = _ => throw new InvalidOperationException(), ToNative = _ => throw new InvalidOperationException(),
             Bodies = new()
             {
-                ManagedType = shape.Managed, ManagedAbiType = "ulong", CopyReferenceReturns = !shared, CopyReferenceParameters = shape.Type is StructDescriptor && !shape.SelectedFieldsSnapshot,
+                ManagedType = shape.Managed, ManagedAbiType = "ulong", CopyReferenceReturns = !shared, CopyReferenceParameters = shape.Type is StructDescriptor && (!shape.SelectedFieldsSnapshot || shape.Type.SourceFile?.Converters.IsCopyableSettingsSnapshot(shape.Type.NativeQualifiedName) == true),
                 SelectedFieldsSnapshot = shape.SelectedFieldsSnapshot,
                 AssignNativeValue = shape.SelectedFieldsSnapshot ? (destination, source) => "([&]() { " + AssignFields(shape, destination, source) + " }())" : null,
                 CopiedCallbackValue = shape.Type is StructDescriptor && !shape.SelectedFieldsSnapshot && shape.Leaves.All(l => !l.Scalar.RawPointer),
                 ReleaseManagedAbi = context => $"global::System.Runtime.InteropServices.Marshal.FreeCoTaskMem((nint)(nuint)({context.Value}));",
                 ReleaseNativeAbi = context => $"::CoTaskMemFree(reinterpret_cast<void*>({context.Value}));",
-                ManagedSupport = ManagedHelpers, ManagedSupportOwner = shape.Managed, WrapManagedSupport = body => WrapValue(shape, "public partial struct " + shape.Managed.Replace("global::", "").Split('.').Last() + " {\n" + body + "\n}"), NativeSupport = NativeHelpers + ArrayAssertions(shape),
+                ManagedSupport = ManagedHelpers, ManagedSupportOwner = shape.Managed, WrapManagedSupport = body => WrapValue(shape, (shape.Type is ClassDescriptor ? "partial class " : "partial struct ") + shape.Managed.Replace("global::", "").Split('.').Last() + " {\n" + body + "\n}"), NativeSupport = NativeHelpers + ArrayAssertions(shape),
                 NativeRequirements = shape.HasInlineArrays ? NativeSupportRequirements.Merge([HandleNETcpp.CoTaskMemorySupport, new() { Includes = ["<type_traits>"] }]) : HandleNETcpp.CoTaskMemorySupport,
                 ManagedToAbi = context =>
                 {
@@ -421,7 +427,7 @@ internal sealed class AutomaticFieldConverters
                 AbiToManaged = context =>
                 {
                     string value = context.Unique("__fieldsValue");
-                    return new(value, Setup: $"{shape.Managed} {value} = default;\n" + string.Join("\n", shape.Leaves.Select(leaf => WriteManaged(leaf, value, ManagedRead(leaf, $"global::{context.Support}.Read<{leaf.Scalar.Managed}>((nint)(nuint)({context.Value}), {leaf.Offset})")))),
+                    return new(value, Setup: $"{shape.Managed} {value} = {(shape.Type is ClassDescriptor ? "new()" : "default")};\n" + string.Join("\n", shape.Leaves.Select(leaf => WriteManaged(leaf, value, ManagedRead(leaf, $"global::{context.Support}.Read<{leaf.Scalar.Managed}>((nint)(nuint)({context.Value}), {leaf.Offset})")))),
                         Cleanup: $"global::System.Runtime.InteropServices.Marshal.FreeCoTaskMem((nint)(nuint)({context.Value}));");
                 },
                 AbiToNative = context =>
@@ -484,10 +490,10 @@ internal sealed class AutomaticFieldConverters
             "inline void Free(unsigned long long address) { if(!address) return; " + Release(true) + " ::CoTaskMemFree(reinterpret_cast<void*>(address)); }\n}" + ArrayAssertions(shape);
         var bodies = new ConverterBodies
         {
-            ManagedType = shape.Managed, ManagedAbiType = "ulong", CopyReferenceReturns = true, CopyReferenceParameters = shape.Type is StructDescriptor && !shape.SelectedFieldsSnapshot,
+            ManagedType = shape.Managed, ManagedAbiType = "ulong", CopyReferenceReturns = true, CopyReferenceParameters = shape.Type is StructDescriptor && (!shape.SelectedFieldsSnapshot || shape.Type.SourceFile?.Converters.IsCopyableSettingsSnapshot(shape.Type.NativeQualifiedName) == true),
                 SelectedFieldsSnapshot = shape.SelectedFieldsSnapshot,
                 AssignNativeValue = shape.SelectedFieldsSnapshot ? (destination, source) => "([&]() { " + AssignFields(shape, destination, source) + " }())" : null,
-            ManagedSupportOwner = shape.Managed, WrapManagedSupport = body => WrapValue(shape, "public partial struct " + shape.Managed.Replace("global::", "").Split('.').Last() + " {\n" + body + "\n}"), ManagedSupport = managedSupport, NativeSupport = nativeSupport,
+            ManagedSupportOwner = shape.Managed, WrapManagedSupport = body => WrapValue(shape, (shape.Type is ClassDescriptor ? "partial class " : "partial struct ") + shape.Managed.Replace("global::", "").Split('.').Last() + " {\n" + body + "\n}"), ManagedSupport = managedSupport, NativeSupport = nativeSupport,
             NativeRequirements = NativeSupportRequirements.Merge(parts.Select(p=>p.NativeRequirements).Append(HandleNETcpp.CoTaskMemorySupport).Append(new() { Includes = ["<utility>"] })),
             ReleaseManagedAbi = c => $"global::{c.Support}.Free((nint)(nuint)({c.Value}));",
             ReleaseNativeAbi = c => $"::{c.Support}::Free({c.Value});",
@@ -504,7 +510,7 @@ internal sealed class AutomaticFieldConverters
             },
             AbiToManaged = c =>
             {
-                string result=c.Unique("__recordValue"), setup=$"{shape.Managed} {result}=default;\n";
+                string result=c.Unique("__recordValue"), setup=$"{shape.Managed} {result}={(shape.Type is ClassDescriptor ? "new()" : "default")};\n";
                 for(int i=0;i<parts.Length;++i)
                 {
                     var leaf=shape.Leaves[i]; var child=parts[i].AbiToManaged(Child(i,c,$"global::{c.Support}.Read<{leaf.Scalar.Managed}>((nint)(nuint)({c.Value}), {leaf.Offset})",false,"false"));
@@ -549,20 +555,21 @@ internal sealed class AutomaticFieldConverters
         source.Replace(cpp ? "namespace {Support}" : "class {Support}", (cpp ? "namespace " : "class ") + name)
             .Replace("{Support}", "{Support}" + (cpp ? "::" : ".") + name);
 
-    void Attach(TypeInfo type)
+    void Attach(TypeInfo type, TypeConverterRegistry? registry)
     {
         if (type is NamedTypeInfo named)
         {
-            foreach (var argument in named.Arguments.Select(a => a.Type).OfType<TypeInfo>()) Attach(argument);
+            foreach (var argument in named.Arguments.Select(a => a.Type).OfType<TypeInfo>()) Attach(argument, registry);
             if (named.Converter == null && Definition(named) is { } definition && converters.TryGetValue(definition, out var converter))
             {
-                named.Converter = converter;
+                named.Converter = registry?.ManagedValueAlias(named) is { } managedAlias && converter.Bodies != null
+                    ? converter.ProjectManagedValue(managedAlias) : converter;
                 attached++;
             }
         }
-        else if (type is ReferenceTypeInfo reference) Attach(reference.Referent);
-        else if (type is PointerTypeInfo pointer) Attach(pointer.Pointee);
-        else if (type is ArrayTypeInfo array) Attach(array.ElementType);
+        else if (type is ReferenceTypeInfo reference) Attach(reference.Referent, registry);
+        else if (type is PointerTypeInfo pointer) Attach(pointer.Pointee, registry);
+        else if (type is ArrayTypeInfo array) Attach(array.ElementType, registry);
     }
 
     public static IEnumerable<NativeTypeConverter> Converters(TypeInfo type)

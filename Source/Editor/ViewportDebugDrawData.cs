@@ -95,10 +95,10 @@ namespace FlaxEditor
         /// <param name="drawScenes">True if draw all loaded scenes too, otherwise will draw only provided actors.</param>
         public unsafe void DrawActors(bool drawScenes = false)
         {
-            fixed (IntPtr* actors = ActorsPtrs)
-            {
-                DebugDraw.DrawActors(new IntPtr(actors), _actors.Count, drawScenes);
-            }
+            var actors = new Actor[_actors.Count];
+            for (int i = 0; i < actors.Length; i++)
+                actors[i] = (Actor)FlaxEngine.Object.FromUnmanagedPtr(_actors[i]);
+            DebugDraw.DrawActors(actors, actors.Length, drawScenes);
         }
 
         /// <summary>

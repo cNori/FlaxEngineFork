@@ -319,6 +319,11 @@ internal sealed class ExportPlan
         foreach (var group in selected.OfType<FunctionDescriptor>().Where(f => f.Api.Property).GroupBy(f => (Owner: f.Parent, Name: f.Name.text.StartsWith("Get", StringComparison.Ordinal) || f.Name.text.StartsWith("Set", StringComparison.Ordinal) ? f.Name.text[3..] : f.Name.text)))
         {
             if (group.Key.Owner is not TypeDescriptor owner) { Error(group.First(), "API_PROPERTY requires a class, struct or interface owner."); continue; }
+            if (owner.SourceFile?.Converters.IsHandwrittenManagedMember(owner.NativeQualifiedName + "::" + group.Key.Name) == true)
+            {
+                foreach (var endpoint in group) selected.Remove(endpoint);
+                continue;
+            }
             var getters = group.Where(f => !Void(f.TypeInfo?.ReturnType)).ToList();
             var setters = group.Where(f => Void(f.TypeInfo?.ReturnType)).ToList();
             if (getters.Count > 1 || setters.Count > 1 || getters.Any(f => f.Fields.Count != 0) || setters.Any(f => f.Fields.Count != 1))
@@ -360,6 +365,7 @@ internal sealed class ExportPlan
             Token name = origin.Name; name.text = group.Key.Name;
             FieldDescriptor property = new() { Name = name, TypeInfo = type, HeaderTokens = new(origin.HeaderTokens), Parent = owner,
                 NamespaceTokens = new(origin.NamespaceTokens), EnclosingTypeTokens = new(origin.EnclosingTypeTokens), Access = origin.Access };
+            property.Api.ManagedAccess = group.Select(f => f.Api.ManagedAccess).FirstOrDefault(a => a != null);
             property.Api.ManagedAttributes.AddRange(group.SelectMany(f => f.Api.ManagedAttributes).Distinct(StringComparer.Ordinal));
             selected.Add(property);
             if (!additional.TryGetValue(owner, out var members)) additional.Add(owner, members = []);
@@ -498,6 +504,9 @@ internal sealed class ExportPlan
             PointerTypeInfo pointer => new PointerTypeInfo { Pointee = pointer.Pointee },
             _ => field.TypeInfo
         };
+        if (field.IsBitField && string.Concat(field.BitWidthTokens.Where(t => !t.IsTrivia).Select(t => t.text)) == "1" &&
+            field.SourceFile?.Converters.FlaxScriptingObjects == true)
+            valueType = new NamedTypeInfo { Name = "bool", Resolution = TypeResolution.Builtin };
         bool readOnly = field.Api.Binding.ReadOnly || IsConst(field.TypeInfo) || field.TypeInfo.SpecifierTokens.Any(t => t == "constexpr");
         TypeInfo getterType = valueType;
         if (readOnly && valueType is NamedTypeInfo { Converter.Bodies.BorrowedObjectElements: true } borrowed)

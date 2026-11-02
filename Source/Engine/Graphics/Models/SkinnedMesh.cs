@@ -90,7 +90,7 @@ namespace FlaxEngine
         /// <summary>
         /// Gets the parent model asset.
         /// </summary>
-        public SkinnedModel ParentSkinnedModel => (SkinnedModel)Internal_GetParentModel(__unmanagedPtr);
+        public SkinnedModel ParentSkinnedModel => (SkinnedModel)Internal_GetParentModel();
 
         /// <summary>
         /// Updates the skinned model mesh vertex and index buffer data.
@@ -126,7 +126,7 @@ namespace FlaxEngine
             if (colors != null && colors.Length != vertices.Length)
                 throw new ArgumentOutOfRangeException(nameof(colors));
 
-            if (Internal_UpdateMeshUInt(__unmanagedPtr, vertices.Length, triangles.Length / 3, vertices, triangles, blendIndices, blendWeights, normals, tangents, uv, colors))
+            if (Internal_UpdateMeshUInt(vertices.Length, triangles.Length / 3, vertices, triangles, blendIndices, blendWeights, normals, tangents, uv, colors))
                 throw new Exception("Failed to update mesh data.");
         }
 
@@ -164,7 +164,7 @@ namespace FlaxEngine
             if (colors != null && colors.Length != vertices.Length)
                 throw new ArgumentOutOfRangeException(nameof(colors));
 
-            if (Internal_UpdateMeshUInt(__unmanagedPtr, vertices.Length, triangles.Length / 3, vertices, triangles, blendIndices, blendWeights, normals, tangents, uv, colors))
+            if (Internal_UpdateMeshUInt(vertices.Length, triangles.Length / 3, vertices, triangles, blendIndices, blendWeights, normals, tangents, uv, colors))
                 throw new Exception("Failed to update mesh data.");
         }
 
@@ -202,7 +202,7 @@ namespace FlaxEngine
             if (colors != null && colors.Length != vertices.Length)
                 throw new ArgumentOutOfRangeException(nameof(colors));
 
-            if (Internal_UpdateMeshUShort(__unmanagedPtr, vertices.Length, triangles.Length / 3, vertices, triangles, blendIndices, blendWeights, normals, tangents, uv, colors))
+            if (Internal_UpdateMeshUShort(vertices.Length, triangles.Length / 3, vertices, triangles, blendIndices, blendWeights, normals, tangents, uv, colors))
                 throw new Exception("Failed to update mesh data.");
         }
 
@@ -281,7 +281,7 @@ namespace FlaxEngine
         [Obsolete("Use new MeshAccessor and depend on GPUVertexLayout when accessing mesh data.")]
         public Vertex0[] DownloadVertexBuffer0(bool forceGpu = false)
         {
-            var result = (Vertex0[])Internal_DownloadBuffer(__unmanagedPtr, forceGpu, typeof(Vertex0), (int)InternalBufferType.VB0);
+            var result = (Vertex0[])Internal_DownloadBuffer(forceGpu, typeof(Vertex0), (int)InternalBufferType.VB0);
             if (result == null)
                 throw new Exception("Failed to download mesh data.");
             return result;

@@ -413,6 +413,7 @@ namespace Flax.Build.NativeCpp
                 "System.Console",
                 "System.Core",
                 "System.Diagnostics.StackTrace",
+                "System.Diagnostics.TraceSource",
                 "System.Globalization",
                 "System.IO",
                 "System.IO.Compression",
@@ -447,6 +448,7 @@ namespace Flax.Build.NativeCpp
 
                 "System.Threading",
                 "System.Threading.Thread",
+                "System.Threading.ThreadPool",
 
                 "System.Reflection",
                 //"System.Reflection.Metadata",

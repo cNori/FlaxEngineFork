@@ -180,7 +180,9 @@ namespace FlaxEditor.Windows.Assets
                 return;
 
             _asset.Locale = _proxy.Locale;
-            _asset.FallbackTable = _proxy.FallbackTable;
+            var fallback = new SoftObjectReference();
+            fallback.Set(_proxy.FallbackTable);
+            _asset.FallbackTable = fallback;
             _asset.Entries = _proxy.Entries;
             if (_asset.Save(_item.Path))
             {
@@ -207,7 +209,7 @@ namespace FlaxEditor.Windows.Assets
             _proxy = new Proxy
             {
                 Locale = _asset.Locale,
-                FallbackTable = _asset.FallbackTable,
+                FallbackTable = _asset.FallbackTable.Get<LocalizedStringTable>(),
                 Entries = _asset.Entries,
             };
             _presenter.Select(_proxy);

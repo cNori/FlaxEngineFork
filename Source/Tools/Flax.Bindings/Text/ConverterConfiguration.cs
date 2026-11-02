@@ -24,19 +24,34 @@ internal static class ConverterConfiguration
         if (engineSource || editorSource)
         {
             registry.DefaultManagedNamespace = editorSource ? "FlaxEditor" : "FlaxEngine";
+            // These internal headers rely on the include context of their owner .cpp.
+            // Keep that dependency explicit instead of guessing missing C++ declarations.
+            if (path.EndsWith("/Foliage/FoliageType.h", StringComparison.OrdinalIgnoreCase)) registry.ReflectionPreambleHeaders.Add("Engine/Foliage/FoliageCluster.h");
+            if (path.EndsWith("/Content/Upgraders/ModelAssetUpgrader.h", StringComparison.OrdinalIgnoreCase)) registry.ReflectionPreambleHeaders.Add("Engine/Content/Assets/Model.h");
+            if (path.EndsWith("/Content/Upgraders/SkinnedModelAssetUpgrader.h", StringComparison.OrdinalIgnoreCase)) registry.ReflectionPreambleHeaders.AddRange(["Engine/Core/Math/Matrix.h", "Engine/Graphics/Models/Types.h"]);
+            if (path.Contains("/ShadersCompilation/Parser/", StringComparison.OrdinalIgnoreCase)) registry.ReflectionPreambleHeaders.AddRange(["Engine/Graphics/Config.h", "Engine/ShadersCompilation/Parser/ShaderMeta.h", "Engine/ShadersCompilation/Parser/ITokenReadersContainer.h", "Engine/ShadersCompilation/Parser/ShaderProcessing.h"]);
+
             registry.CanonicalValueRecords = true;
+            registry.RuntimeClassSupport = new() { Includes = ["\"Engine/Scripting/ManagedCLR/MUtils.h\""] };
             registry.ManagedUsings.Add("FlaxEngine");
-            foreach (string name in new[] { "Float2", "Float3", "Float4", "Double2", "Double3", "Double4", "Int2", "Int3", "Int4", "Quaternion", "Transform", "Color", "BoundingBox", "BoundingSphere", "Rectangle", "Ray", "Plane" })
+            foreach (string name in new[] { "Float2", "Float3", "Float4", "Double2", "Double3", "Double4", "Int2", "Int3", "Int4", "Quaternion", "OrientedBoundingBox", "Transform", "Color", "BoundingBox", "BoundingSphere", "Rectangle", "Ray", "Plane" })
                 registry.RegisterManagedValuePartial(name, "global::FlaxEngine." + name);
+            foreach (string name in new[] { "Vector2", "Vector3", "Vector4" })
+                registry.RegisterManagedValueAlias(name, "global::FlaxEngine." + name);
+            registry.RegisterManagedValuePartial("LocalizedString", "global::FlaxEngine.LocalizedString");
             registry.RegisterManagedValuePartial("Matrix", "global::FlaxEngine.Matrix", generateFields: false);
             registry.RegisterManagedValuePartial("Matrix3x3", "global::FlaxEngine.Matrix3x3", generateFields: false);
         }
         registry.FlaxScriptingObjects = true;
+        registry.RegisterHandwrittenManagedMember("GraphicsSettings::UeeHDRProbes");
+        registry.RegisterHandwrittenManagedMember("GraphicsSettings::UseHDRProbes");
         registry.RegisterManagedGenericType("JsonAssetReference", "global::FlaxEngine.JsonAssetReference");
         registry.RegisterOpaqueHandleProperty("WindowBase::CursorImage");
         registry.RegisterInputPointerArray("DebugDraw::DrawActors", "selectedActors", "selectedActorsCount");
         registry.FlaxDelegateLifetimes = true;
         foreach (string name in new[] { "CollectDrawCalls", "PreRender", "PostRender" }) registry.RegisterSynchronousEvent("SceneRenderTask::" + name);
+        // These callbacks prepare camera/GPU state for the current render, not a later tick.
+        foreach (string name in new[] { "Begin", "Render", "End", "Present" }) registry.RegisterSynchronousEvent("RenderTask::" + name);
         // Connection validation must deny the connection if a subscribed managed
         // handler cannot run or cannot return a successfully converted result.
         registry.RegisterSynchronousEvent("NetworkManager::ClientConnecting", "arg0.Result = 1;");
@@ -50,7 +65,8 @@ internal static class ConverterConfiguration
         FlaxVariantConverter.Register(registry);
         FlaxAbiConverters.Register(registry);
         FlaxHalfConverter.Register(registry);
-        registry.RegisterExportedSettingsSnapshot("ModelTool::Options");
+        registry.RegisterExportedSettingsSnapshot("ModelTool::Options", copyReferenceParameters: true);
+        registry.RegisterExportedSettingsSnapshot("TextureTool::Options", copyReferenceParameters: true);
         registry.RegisterDeclarationMacro("DEPRECATED", DeclarationMacroKind.Deprecated);
         foreach(string macro in new[]{"DECLARE_SCRIPTING_TYPE_MINIMAL","DECLARE_SCRIPTING_TYPE_STRUCTURE","DECLARE_SCRIPTING_TYPE_NO_SPAWN","DECLARE_SCRIPTING_TYPE","DECLARE_SCRIPTING_TYPE_WITH_CONSTRUCTOR_IMPL",
             "DECLARE_SCENE_OBJECT","DECLARE_SCENE_OBJECT_ABSTRACT","DECLARE_SCENE_OBJECT_NO_SPAWN","DECLARE_ASSET_HEADER","DECLARE_BINARY_ASSET_HEADER"})

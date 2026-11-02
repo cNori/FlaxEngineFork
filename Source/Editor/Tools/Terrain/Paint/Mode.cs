@@ -152,8 +152,8 @@ namespace FlaxEditor.Tools.Terrain.Paint
                 p.ModifiedSize = modifiedSize;
                 p.PatchCoord = patch.PatchCoord;
                 p.PatchPositionLocal = patchPositionLocal;
-                p.SourceData = sourceData;
-                p.SourceDataOther = sourceDataOther;
+                p.SourceData = (Color32*)sourceData;
+                p.SourceDataOther = (Color32*)sourceDataOther;
                 Apply(ref p);
             }
         }

@@ -29,7 +29,7 @@ namespace FlaxEngine
         /// <returns>The loaded texture data or null if failed.</returns>
         public TextureData GetTextureData()
         {
-            return Internal_GetTextureData(__unmanagedPtr);
+            return Internal_GetTextureData();
         }
 
         /// <summary>
@@ -186,7 +186,7 @@ namespace FlaxEngine
                 }
 
                 // Call backend
-                if (Internal_InitCSharp(__unmanagedPtr, new IntPtr(&t)))
+                if (Internal_InitCSharp(new IntPtr(&t)))
                     throw new Exception("Failed to init texture data.");
             }
         }

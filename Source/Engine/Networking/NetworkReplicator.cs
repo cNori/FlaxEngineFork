@@ -74,7 +74,7 @@ namespace FlaxEngine.Networking
             // C#-only types (eg. custom C# structures) cannot use native serializers due to missing ScriptingType
             if (typeof(FlaxEngine.Object).IsAssignableFrom(type))
             {
-                Internal_AddSerializer(type, Marshal.GetFunctionPointerForDelegate(serialize), Marshal.GetFunctionPointerForDelegate(deserialize));
+                Internal_AddSerializer(type, new Action<IntPtr, IntPtr>(serialize.Invoke), new Action<IntPtr, IntPtr>(deserialize.Invoke));
             }
         }
 
@@ -89,7 +89,7 @@ namespace FlaxEngine.Networking
         [Unmanaged]
         public static bool InvokeSerializer(Type type, FlaxEngine.Object instance, NetworkStream stream, bool serialize)
         {
-            return Internal_InvokeSerializer(type, FlaxEngine.Object.GetUnmanagedPtr(instance), FlaxEngine.Object.GetUnmanagedPtr(stream), serialize);
+            return Internal_InvokeSerializer(type, FlaxEngine.Object.GetUnmanagedPtr(instance), stream, serialize);
         }
 
         /// <summary>
@@ -109,7 +109,7 @@ namespace FlaxEngine.Networking
                 serializer(instance, FlaxEngine.Object.GetUnmanagedPtr(stream));
                 return false;
             }
-            return Internal_InvokeSerializer(type, instance, FlaxEngine.Object.GetUnmanagedPtr(stream), serialize);
+            return Internal_InvokeSerializer(type, instance, stream, serialize);
         }
 
         /// <summary>
@@ -124,7 +124,7 @@ namespace FlaxEngine.Networking
         [Unmanaged]
         public static bool EndInvokeRPC(Object obj, Type type, string name, NetworkStream argsStream, uint[] targetIds = null)
         {
-            return Internal_CSharpEndInvokeRPC(FlaxEngine.Object.GetUnmanagedPtr(obj), type, name, FlaxEngine.Object.GetUnmanagedPtr(argsStream), targetIds);
+            return Internal_CSharpEndInvokeRPC(obj, type, name, argsStream, targetIds);
         }
 
         /// <summary>
@@ -153,7 +153,7 @@ namespace FlaxEngine.Networking
             // Store the reference to prevent garbage collection
             _managedExecuteRpcFuncs.Add(execute);
 
-            Internal_AddRPC(type, name, Marshal.GetFunctionPointerForDelegate(execute), isServer, isClient, channel);
+            Internal_AddRPC(type, name, new Action<IntPtr, IntPtr>(execute.Invoke), isServer, isClient, channel);
         }
     }
 }

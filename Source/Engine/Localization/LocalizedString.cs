@@ -20,19 +20,13 @@ namespace FlaxEngine
 
     partial class LocalizedString : IEquatable<LocalizedString>, IEquatable<string>, IComparable, IComparable<LocalizedString>, IComparable<string>
     {
+        public LocalizedString() { }
+        public LocalizedString(string value) { Value = value; }
+
         /// <summary>
         /// Empty string without localization.
         /// </summary>
         public static readonly LocalizedString Empty = new LocalizedString(null);
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="LocalizedString"/> class.
-        /// </summary>
-        /// <param name="value">The value.</param>
-        public LocalizedString(string value)
-        {
-            Value = value;
-        }
 
         /// <summary>
         /// Gets the localized plural string for the current language by using string id lookup.

@@ -56,7 +56,7 @@ namespace FlaxEditor.SceneGraph.Actors
                 return false;
             }
 
-            return Camera.Internal_IntersectsItselfEditor(FlaxEngine.Object.GetUnmanagedPtr(_actor), ref ray.Ray, out distance);
+            return ((Camera)_actor).IntersectsItselfEditor(in ray.Ray, out distance);
         }
 
         /// <inheritdoc />

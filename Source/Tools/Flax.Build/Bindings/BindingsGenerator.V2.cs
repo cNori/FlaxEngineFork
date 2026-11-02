@@ -58,7 +58,8 @@ namespace Flax.Build.Bindings
             var project = Builder.GetModuleProject(module, buildData);
             string output = Path.Combine(options.IntermediateFolder, "BindingsV2");
             Log.Verbose("Generating V2 API calls for " + module.Name);
-            var generated = ModuleGenerator.Generate(new ModuleRequest
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            var generated = ModuleGenerationCache.Generate(new ModuleRequest
             {
                 Headers = headers,
                 IncludeDirectories = options.CompileEnv.IncludePaths.Concat(options.PublicIncludePaths).Concat(options.PrivateIncludePaths)
@@ -70,9 +71,12 @@ namespace Flax.Build.Bindings
                     .Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
                 Definitions = definitions, CppStandard = standard, OutputDirectory = output,
                 NativeLibrary = module.BinaryModuleName,
+                ReflectionOutputDirectory = Configuration.NativeReflection ? Path.Combine(output, "Reflection") : null,
+                ReflectionSourceRoot = Path.Combine(project.ProjectFolderPath, "Source"),
                 SharedManagedDirectory = Path.Combine(Path.GetDirectoryName(options.IntermediateFolder), "BindingsV2Shared", module.BinaryModuleName),
                 ProjectClassLifetimes = true, RetainedLegacyNetworkRpc = true
-            });
+            }, Path.Combine(output, "Module.cache.json"), out bool cacheHit);
+            Log.Verbose($"V2 bindings {module.Name}: {(cacheHit ? "cache hit" : "generated")} in {timer.Elapsed.TotalMilliseconds:F0} ms");
             foreach (var diagnostic in generated.Diagnostics)
             {
                 if (diagnostic.Error) Log.Error(diagnostic.Text); else Log.Warning(diagnostic.Text);
@@ -84,7 +88,7 @@ namespace Flax.Build.Bindings
             // rather than globbing stale content-addressed snapshots from the cache.
             Utilities.WriteFileIfChanged(Path.Combine(options.IntermediateFolder, module.Name + ".BindingsV2.ManagedFiles"),
                 string.Join("\n", generated.Files.Where(f => !f.Native).Select(f => f.Path).Distinct(StringComparer.OrdinalIgnoreCase)) + "\n");
-            bindings.AdditionalCppFiles = generated.Files.Where(f => f.Native).Select(f => f.Path).ToList();
+            bindings.AdditionalCppFiles = generated.Files.Where(f => f.Native && f.Path.EndsWith(".cpp", StringComparison.OrdinalIgnoreCase)).Select(f => f.Path).ToList();
             foreach (var file in generated.Files.Where(f => !f.Native))
                 if (!options.SourceFiles.Contains(file.Path)) options.SourceFiles.Add(file.Path);
             // Replace the old aggregate managed file so a previous legacy result

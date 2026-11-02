@@ -26,7 +26,7 @@ namespace FlaxEngine
                 if (System.Runtime.CompilerServices.Unsafe.SizeOf<BezierCurve<Transform>.Keyframe>() != Transform.SizeInBytes * 3 + sizeof(float))
                     throw new Exception("Invalid size of BezierCurve keyframe " + System.Runtime.CompilerServices.Unsafe.SizeOf<BezierCurve<Transform>.Keyframe>() + " bytes.");
 #endif
-                Internal_GetKeyframes(__unmanagedPtr, _keyframes);
+                Internal_GetKeyframes(_keyframes);
                 return _keyframes;
             }
             set
@@ -34,7 +34,7 @@ namespace FlaxEngine
                 if (value == null)
                     value = Array.Empty<BezierCurve<Transform>.Keyframe>();
                 _keyframes = null;
-                Internal_SetKeyframes(__unmanagedPtr, value, System.Runtime.CompilerServices.Unsafe.SizeOf<BezierCurve<Transform>.Keyframe>());
+                Internal_SetKeyframes(value, System.Runtime.CompilerServices.Unsafe.SizeOf<BezierCurve<Transform>.Keyframe>());
             }
         }
 

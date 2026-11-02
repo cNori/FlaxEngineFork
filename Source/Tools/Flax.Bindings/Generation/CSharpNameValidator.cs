@@ -181,5 +181,5 @@ internal sealed class CSharpNameValidator
     public static string EnumName(EnumDescriptor enumeration) => string.IsNullOrEmpty(enumeration.Name.text)
         ? "__AnonymousEnum_L" + (enumeration.HeaderTokens.FirstOrDefault(t => t == "enum").line + 1) : enumeration.Name.text;
     static Token Where(DeclarationDescriptor declaration) => string.IsNullOrEmpty(declaration.Name.text) ? declaration.HeaderTokens.FirstOrDefault(t => !t.IsTrivia) : declaration.Name;
-    static bool Deleted(FunctionDescriptor function) => function.TypeInfo?.SuffixTokens is { } suffix && suffix.SkipWhile(t => t != "=").Skip(1).FirstOrDefault(t => !t.IsTrivia) == "delete";
+    static bool Deleted(FunctionDescriptor function) => function.Parent is not TypeDescriptor { Api.NativeInvokeUseName: true } && function.TypeInfo?.SuffixTokens is { } suffix && suffix.SkipWhile(t => t != "=").Skip(1).FirstOrDefault(t => !t.IsTrivia) == "delete";
 }

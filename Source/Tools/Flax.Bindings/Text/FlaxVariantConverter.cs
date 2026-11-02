@@ -7,8 +7,8 @@ internal static class FlaxVariantConverter
     public static void Register(TypeConverterRegistry registry) => registry.RegisterBodyConverter("Variant", "unsigned long long", new()
     {
         MoveInputs = true, ManagedType = "object", ManagedAbiType = "ulong", CopyReferenceReturns = true,
-        ManagedSupport = ManagedHelpers, NativeSupport = NativeHelpers,
-        NativeRequirements = NativeSupportRequirements.Merge([VETools.Generation.HandleNETcpp.CoTaskMemorySupport, new() { Includes = ["<vector>", "\"Engine/Core/Types/Variant.h\"", "\"Engine/Core/Types/Guid.h\"", "\"Engine/Core/Types/StringView.h\"", "\"Engine/Core/Types/Span.h\"", "\"Engine/Core/Collections/Array.h\"", "\"Engine/Core/Collections/Dictionary.h\""] }]),
+        ManagedSupport = MathSupport(ManagedHelpers, registry, managed: true), NativeSupport = MathSupport(NativeHelpers, registry, managed: false),
+        NativeRequirements = NativeSupportRequirements.Merge([VETools.Generation.HandleNETcpp.CoTaskMemorySupport, new() { Includes = MathHeaders(registry).Concat(new[] { "<vector>", "\"Engine/Core/Types/Variant.h\"", "\"Engine/Core/Types/Guid.h\"", "\"Engine/Core/Types/StringView.h\"", "\"Engine/Core/Types/Span.h\"", "\"Engine/Core/Collections/Array.h\"", "\"Engine/Core/Collections/Dictionary.h\"" }).ToArray() }]),
         ReleaseManagedAbi = c => $"global::System.Runtime.InteropServices.Marshal.FreeCoTaskMem((nint)(nuint)({c.Value}));",
         ReleaseNativeAbi = c => $"::CoTaskMemFree(reinterpret_cast<void*>({c.Value}));",
         ManagedToAbi = c =>
@@ -26,6 +26,46 @@ internal static class FlaxVariantConverter
                 $"if (!{c.Completed}) ::CoTaskMemFree(reinterpret_cast<void*>({buffer}));");
         }
     }, nativeCppType: "::Variant", nativeDefault: "::Variant{}", existingManagedType: true);
+
+    // Serialize named scalar fields, never native struct bytes or CLR layouts.
+    static readonly (string Name, string Scalar, string Fields)[] MathValues = [
+        ("Color", "float", "R G B A"),
+        ("Float2", "float", "X Y"), ("Float3", "float", "X Y Z"), ("Float4", "float", "X Y Z W"),
+        ("Double2", "double", "X Y"), ("Double3", "double", "X Y Z"), ("Double4", "double", "X Y Z W"),
+        ("Int2", "int32", "X Y"), ("Int3", "int32", "X Y Z"), ("Int4", "int32", "X Y Z W"),
+        ("Quaternion", "float", "X Y Z W")
+    ];
+    static bool HasMath(TypeConverterRegistry registry) => registry.DefaultManagedNamespace is "FlaxEngine" or "FlaxEditor";
+    static IEnumerable<string> MathHeaders(TypeConverterRegistry registry) => !HasMath(registry) ? [] :
+        new[] { "Color", "Vector2", "Vector3", "Vector4", "Quaternion" }.Select(name => "\"Engine/Core/Math/" + name + ".h\"").Concat(new[] { "\"Engine/Scripting/Scripting.h\"", "\"Engine/Content/Asset.h\"" });
+    static string MathSupport(string source, TypeConverterRegistry registry, bool managed)
+    {
+        if (!HasMath(registry)) return source;
+        List<string> write = [], read = [], encode = [], decode = [];
+        for (int i = 0; i < MathValues.Length; ++i)
+        {
+            var (name, scalar, names) = MathValues[i]; var fields = names.Split(' '); int tag = 16 + i;
+            string readScalar = scalar == "float" ? "ReadSingle" : scalar == "double" ? "ReadDouble" : "ReadInt32";
+            write.Add($"case global::FlaxEngine.{name} v: w.Write((byte){tag}); " + string.Join(" ", fields.Select(f => $"w.Write(v.{f});")) + " break;");
+            read.Add($"case {tag}: return new global::FlaxEngine.{name} {{ " + string.Join(", ", fields.Select(f => $"{f} = r.{readScalar}()")) + " };");
+            decode.Add($"case {tag}: {{ ::{name} v; " + string.Join(" ", fields.Select(f => $"v.{f} = r.Get<{scalar}>();")) + " return ::Variant(v); }");
+            encode.Add($"case ::VariantType::{name}: {{ const auto& v = value.As{name}(); w.Tag({tag}); " + string.Join(" ", fields.Select(f => $"w.Put<{scalar}>(v.{f});")) + " break; }");
+        }
+        // Real-vector wrappers are nominal managed types, while native Variant tags retain their scalar precision.
+        for (int dimension = 2; dimension <= 4; ++dimension)
+            write.Add($"case global::FlaxEngine.Vector{dimension} v:\n#if USE_LARGE_WORLDS\n Put(w, (global::FlaxEngine.Double{dimension})v, depth);\n#else\n Put(w, (global::FlaxEngine.Float{dimension})v, depth);\n#endif\n break;");
+        // Object references use registry identities, never CLR addresses or untyped native pointers.
+        foreach (var (name, tag) in new[] { ("Asset", 28), ("Object", 27) })
+        {
+            write.Add($"case global::FlaxEngine.{name} v: w.Write((byte){tag}); w.Write((v ? v.ID : global::System.Guid.Empty).ToByteArray()); break;");
+            read.Add($"case {tag}: {{ var id = new global::System.Guid(Bytes(r, 16)); return global::FlaxEngine.Object.TryFind<global::FlaxEngine.{name}>(ref id); }}");
+            string native = name == "Object" ? "ScriptingObject" : "Asset";
+            decode.Add($"case {tag}: {{ ::Guid id; id.A = r.Get<uint32>(); id.B = r.Get<uint32>(); id.C = r.Get<uint32>(); id.D = r.Get<uint32>(); auto* object = ::Scripting::TryFindObject<::{native}>(id); if (id.IsValid() && !object) throw std::invalid_argument(\"Variant {name} reference is missing or has the wrong type.\"); return ::Variant(object); }}");
+            encode.Add($"case ::VariantType::{name}: {{ auto* object = value.As{name}; if (object) object->RegisterObject(); const auto id = object ? object->GetID() : ::Guid::Empty; w.Tag({tag}); w.Put<uint32>(id.A); w.Put<uint32>(id.B); w.Put<uint32>(id.C); w.Put<uint32>(id.D); break; }}");
+        }
+        return managed ? source.Replace("// VET_MATH_WRITE", string.Join("\n", write)).Replace("// VET_MATH_READ", string.Join("\n", read))
+            : source.Replace("// VET_MATH_DECODE", string.Join("\n", decode)).Replace("// VET_MATH_ENCODE", string.Join("\n", encode));
+    }
 
     // Wire: int32 payload size, then tagged values. All integers are little endian.
     // Tags 0..15: null, bool, short, ushort, int, uint, long, ulong,
@@ -77,6 +117,7 @@ internal static class FlaxVariantConverter
                     Count(v.Count); w.Write((byte)14); w.Write(v.Count);
                     foreach (global::System.Collections.DictionaryEntry pair in v) { if (pair.Key == null) throw new global::System.NotSupportedException("Null Variant dictionary key."); Put(w, pair.Key, depth + 1); Put(w, pair.Value, depth + 1); } break;
                 case global::System.IntPtr v: w.Write((byte)15); w.Write((ulong)(nuint)v); break;
+                // VET_MATH_WRITE
                 default: throw new global::System.NotSupportedException("No Variant value converter registered for managed type '" + value.GetType().FullName + "'.");
                 }
             }
@@ -105,6 +146,7 @@ internal static class FlaxVariantConverter
                 case 13: { int n = Length(r, 1, MaxItems); object[] values = new object[n]; for (int i = 0; i < n; ++i) values[i] = Get(r, depth + 1); return values; }
                 case 14: { int n = Length(r, 2, MaxItems); var values = new global::System.Collections.Generic.Dictionary<object, object>(); for (int i = 0; i < n; ++i) { object key = Get(r, depth + 1); if (key == null || values.ContainsKey(key)) throw new global::System.InvalidOperationException("Null or duplicate Variant dictionary key."); values.Add(key, Get(r, depth + 1)); } return values; }
                 case 15: return (nint)(nuint)r.ReadUInt64();
+                // VET_MATH_READ
                 default: throw new global::System.NotSupportedException("Unknown Variant wire tag.");
                 }
             }
@@ -140,6 +182,7 @@ internal static class FlaxVariantConverter
             case 13: { int n = r.Length(1, MaxItems); ::Array<::Variant> values; values.Resize(n); for (int i = 0; i < n; ++i) values[i] = Decode(r, depth + 1); return ::Variant(values); }
             case 14: { int n = r.Length(2, MaxItems); ::Dictionary<::Variant, ::Variant> values; for (int i = 0; i < n; ++i) { auto key = Decode(r, depth + 1); if (key.Type.Type == ::VariantType::Null || values.ContainsKey(key)) throw std::invalid_argument("Null or duplicate Variant dictionary key."); auto value = Decode(r, depth + 1); values.Add(key, value); } return ::Variant(values); }
             case 15: return ::Variant(reinterpret_cast<void*>(r.Get<uint64>()));
+            // VET_MATH_DECODE
             default: throw std::invalid_argument("Unknown Variant wire tag.");
             }
         }
@@ -162,6 +205,7 @@ internal static class FlaxVariantConverter
             case ::VariantType::Array: { const auto& values = value.AsArray(); int n = values.Count(); if (n < 0 || n > MaxItems) throw std::invalid_argument("Variant array exceeds limit."); w.Tag(13); w.Put<int>(n); for (int i = 0; i < n; ++i) Encode(w, values[i], depth + 1); break; }
             case ::VariantType::Dictionary: { auto* values = value.AsDictionary; if (!values) throw std::invalid_argument("Null Variant dictionary."); int n = values->Count(); if (n < 0 || n > MaxItems) throw std::invalid_argument("Variant dictionary exceeds limit."); w.Tag(14); w.Put<int>(n); for (const auto& pair : *values) { if (pair.Key.Type.Type == ::VariantType::Null) throw std::invalid_argument("Null Variant dictionary key."); Encode(w, pair.Key, depth + 1); Encode(w, pair.Value, depth + 1); } break; }
             case ::VariantType::Pointer: w.Tag(15); w.Put<uint64>(reinterpret_cast<uint64>(value.AsPointer)); break;
+            // VET_MATH_ENCODE
             default: throw std::invalid_argument("No Variant wire converter for this native tag (object, enum, math, structure or managed object).");
             }
         }

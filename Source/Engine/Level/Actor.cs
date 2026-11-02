@@ -80,7 +80,7 @@ namespace FlaxEngine
             set
             {
                 Quaternion.Euler(ref value, out var orientation);
-                Internal_SetOrientation(__unmanagedPtr, ref orientation);
+                Orientation = orientation;
             }
         }
 
@@ -98,7 +98,7 @@ namespace FlaxEngine
             set
             {
                 Quaternion.Euler(ref value, out var orientation);
-                Internal_SetLocalOrientation(__unmanagedPtr, ref orientation);
+                LocalOrientation = orientation;
             }
         }
 
@@ -106,7 +106,7 @@ namespace FlaxEngine
         /// Returns true if actor has any children
         /// </summary>
         [HideInEditor, NoSerialize]
-        public bool HasChildren => Internal_GetChildrenCount(__unmanagedPtr) != 0;
+        public bool HasChildren => GetChildrenCount() != 0;
 
         /// <summary>
         /// Resets actor local transform.

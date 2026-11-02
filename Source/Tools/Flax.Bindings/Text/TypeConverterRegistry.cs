@@ -13,7 +13,8 @@ internal sealed class NativeTypeConverter
     public bool IsAlias { get; init; }
     public bool AutomaticFields { get; init; }
     public bool EnumValue { get; init; }
-    public bool SharedReference { get; init; }
+    bool sharedReference;
+    public bool SharedReference { get => sharedReference; init => sharedReference = value; }
     public bool ExistingManagedType { get; init; }
     public bool RepresentationAdapter { get; init; }
     public bool FunctionValue { get; init; }
@@ -24,20 +25,44 @@ internal sealed class NativeTypeConverter
     public required Func<string, string> ToAbi { get; init; }
     public required Func<string, string> ToNative { get; init; }
     public string? NativeDefault { get; init; }
-    public ConverterBodies? Bodies { get; init; }
+    public ConverterBodies? Bodies { get => bodies; init => bodies = value; }
+    public NativeTypeConverter ProjectManagedValue(string managedType)
+    {
+        var result = (NativeTypeConverter)MemberwiseClone();
+        // Managed aliases have independent layouts; use field packets, never reinterpret a managed ref.
+        result.sharedReference = false;
+        result.bodies = Bodies!.ProjectManagedValue(managedType);
+        return result;
+    }
+    ConverterBodies? bodies;
     public NamedTypeInfo AbiType(TypeQualifiers qualifiers = TypeQualifiers.None) => new() { Name = AbiCppType, Resolution = TypeResolution.Builtin, Qualifiers = qualifiers };
 }
 
 // Explicit declarations only. No typedef discovery, includes or macro expansion.
 internal sealed class TypeConverterRegistry
 {
+    public List<string> ReflectionPreambleHeaders = [];
     public bool FlaxScriptingObjects { get; set; }
+    public NativeSupportRequirements RuntimeClassSupport { get; set; } = new();
     public string? DefaultManagedNamespace { get; set; }
     public bool CanonicalValueRecords { get; set; }
+    readonly HashSet<string> handwrittenManagedMembers = new(StringComparer.Ordinal);
+    public void RegisterHandwrittenManagedMember(string nativeName) => handwrittenManagedMembers.Add(nativeName.TrimStart(':'));
+    public bool IsHandwrittenManagedMember(string nativeName) => handwrittenManagedMembers.Contains(nativeName.TrimStart(':'));
     readonly Dictionary<string, string> managedGenericTypes = new(StringComparer.Ordinal);
     public void RegisterManagedGenericType(string nativeName, string managedName) => managedGenericTypes.Add(nativeName.TrimStart(':'), managedName);
     public string? ManagedGenericType(string nativeName) => managedGenericTypes.GetValueOrDefault(nativeName.TrimStart(':'));
     public HashSet<string> ManagedUsings { get; } = new(StringComparer.Ordinal);
+    readonly Dictionary<string,string> managedValueAliases = new(StringComparer.Ordinal);
+    // Explicit nominal managed value aliases; native specialization identity is unchanged.
+    public void RegisterManagedValueAlias(string nativeName, string managedName) => managedValueAliases.Add(nativeName.TrimStart(':'), managedName);
+    public string? ManagedValueAlias(TypeInfo type)
+    {
+        string? spelling = type.NativeAliasSpelling;
+        if (spelling == null) return null;
+        spelling = System.Text.RegularExpressions.Regex.Replace(spelling, @"\s+(const|volatile)\b", "").Trim().TrimStart(':');
+        return managedValueAliases.GetValueOrDefault(spelling);
+    }
     readonly Dictionary<string,string> managedValuePartials = new(StringComparer.Ordinal);
     public string? ManagedValuePartial(string name) => managedValuePartials.GetValueOrDefault(name.TrimStart(':'));
     readonly HashSet<string> existingValueFields = new(StringComparer.Ordinal);
@@ -50,11 +75,14 @@ internal sealed class TypeConverterRegistry
     public bool FlaxDelegateLifetimes { get; set; }
     public bool FlaxContainers { get; set; }
     public bool FlaxFunctions { get; set; }
+    readonly HashSet<string> copyableSettingsSnapshots = new(StringComparer.Ordinal);
+    public bool IsCopyableSettingsSnapshot(string name) => copyableSettingsSnapshots.Contains(name.TrimStart(':'));
     readonly HashSet<string> exportedSettingsSnapshots = new(StringComparer.Ordinal);
     public bool IsExportedSettingsSnapshot(string name) => exportedSettingsSnapshots.Contains(name.TrimStart(':'));
-    public void RegisterExportedSettingsSnapshot(string name)
+    public void RegisterExportedSettingsSnapshot(string name, bool copyReferenceParameters = false)
     {
         if (!Regex.IsMatch(name, @"^(::)?[A-Za-z_]\w*(::[A-Za-z_]\w*)*$")) throw new ArgumentException("Expected a qualified settings type name.");
+        if (copyReferenceParameters) copyableSettingsSnapshots.Add(name.TrimStart(':'));
         if (!exportedSettingsSnapshots.Add(name.TrimStart(':'))) throw new ArgumentException("Duplicate settings snapshot contract.");
     }
     public bool RetainedLegacyNetworkRpc { get; set; }

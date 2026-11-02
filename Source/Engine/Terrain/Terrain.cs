@@ -48,7 +48,7 @@ namespace FlaxEngine
             {
                 fixed (byte* holesMaskPtr = holesMask)
                 {
-                    return SetupPatchHeightMap(ref patchCoord, heightMap.Length, heightMapPtr, holesMaskPtr, forceUseVirtualStorage);
+                    return SetupPatchHeightMap(ref patchCoord, heightMap.Length, heightMapPtr, (nint)holesMaskPtr, forceUseVirtualStorage);
                 }
             }
         }
@@ -68,7 +68,7 @@ namespace FlaxEngine
 
             fixed (Color32* splatMapPtr = splatMap)
             {
-                return SetupPatchSplatMap(ref patchCoord, index, splatMap.Length, splatMapPtr, forceUseVirtualStorage);
+                return SetupPatchSplatMap(ref patchCoord, index, splatMap.Length, (nint)splatMapPtr, forceUseVirtualStorage);
             }
         }
     }

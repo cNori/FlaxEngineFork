@@ -26,7 +26,7 @@ namespace FlaxEngine
             if (data == null)
                 throw new ArgumentNullException(nameof(data));
             fixed (byte* ptr = data)
-                return Internal_WriteSocket(ref socket, ptr, (uint)data.Length, null);
+                return WriteSocket(socket, (nint)ptr, (uint)data.Length, IntPtr.Zero);
         }
 
         /// <summary>
@@ -42,7 +42,7 @@ namespace FlaxEngine
             if (data == null)
                 throw new ArgumentNullException(nameof(data));
             fixed (byte* ptr = data)
-                return Internal_WriteSocket(ref socket, ptr, (uint)data.Length, &endPoint);
+                return WriteSocket(socket, (nint)ptr, (uint)data.Length, (IntPtr)(&endPoint));
         }
 
         /// <summary>
@@ -57,7 +57,7 @@ namespace FlaxEngine
             if (buffer == null)
                 throw new ArgumentNullException(nameof(buffer));
             fixed (byte* ptr = buffer)
-                return Internal_ReadSocket(ref socket, ptr, (uint)buffer.Length, null);
+                return ReadSocket(socket, (nint)ptr, (uint)buffer.Length, IntPtr.Zero);
         }
 
         /// <summary>
@@ -73,7 +73,7 @@ namespace FlaxEngine
             if (buffer == null)
                 throw new ArgumentNullException(nameof(buffer));
             fixed (byte* ptr = buffer)
-                return Internal_ReadSocket(ref socket, ptr, (uint)buffer.Length, &endPoint);
+                return ReadSocket(socket, (nint)ptr, (uint)buffer.Length, (IntPtr)(&endPoint));
         }
     }
 }

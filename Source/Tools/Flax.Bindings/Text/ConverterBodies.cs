@@ -19,7 +19,8 @@ internal sealed class ConverterBodies
     // Custom/shared helpers without an owner are emitted in the Interop namespace.
     public string? ManagedSupportOwner { get; init; }
     public Func<string,string>? WrapManagedSupport { get; init; }
-    public required string ManagedType { get; init; }
+    string managedType = "";
+    public required string ManagedType { get => managedType; init => managedType = value; }
     public required string ManagedAbiType { get; init; }
     // Explicit native/managed inline representation contract, separate from the
     // transport packet. Never infer native object size from ManagedAbiType.
@@ -28,7 +29,8 @@ internal sealed class ConverterBodies
     // Runtime values (for example Quaternion::Identity) require overload lowering.
     public Func<string, string?>? ManagedOptionalDefault { get; init; }
     // Materialize a native reference return as a managed value rather than exposing a borrowed ref.
-    public bool CopyReferenceReturns { get; init; }
+    bool copyReferenceReturns;
+    public bool CopyReferenceReturns { get => copyReferenceReturns; init => copyReferenceReturns = value; }
     // Read-only reference to a native-owned inline collection. Elements become
     // engine identities; never instantiate, copy or destroy them in glue.
     public bool BorrowedObjectElements { get; init; }
@@ -50,8 +52,22 @@ internal sealed class ConverterBodies
     // Optional owning-packet release hooks for composition inside containers.
     public Func<ConverterEmitContext, string>? ReleaseManagedAbi { get; init; }
     public Func<ConverterEmitContext, string>? ReleaseNativeAbi { get; init; }
-    public required Func<ConverterEmitContext, ConverterBody> ManagedToAbi { get; init; }
-    public required Func<ConverterEmitContext, ConverterBody> AbiToManaged { get; init; }
+    Func<ConverterEmitContext, ConverterBody> managedToAbi = null!;
+    public required Func<ConverterEmitContext, ConverterBody> ManagedToAbi { get => managedToAbi; init => managedToAbi = value; }
+    Func<ConverterEmitContext, ConverterBody> abiToManaged = null!;
+    public required Func<ConverterEmitContext, ConverterBody> AbiToManaged { get => abiToManaged; init => abiToManaged = value; }
+    public ConverterBodies ProjectManagedValue(string target)
+    {
+        var result = (ConverterBodies)MemberwiseClone();
+        result.managedType = target;
+        result.copyReferenceReturns = true;
+        result.managedToAbi = context => ManagedToAbi(context with { Value = "(" + ManagedType + ")(" + context.Value + ")" });
+        result.abiToManaged = context => {
+            var body = AbiToManaged(context);
+            return body with { Expression = "(" + target + ")(" + body.Expression + ")" };
+        };
+        return result;
+    }
     public required Func<ConverterEmitContext, ConverterBody> AbiToNative { get; init; }
     public required Func<ConverterEmitContext, ConverterBody> NativeToAbi { get; init; }
 }
@@ -61,13 +77,24 @@ internal sealed class NativeSupportRequirements
     public IReadOnlyList<string> Includes { get; init; } = [];
     public IReadOnlyList<string> Libraries { get; init; } = [];
     public IReadOnlyList<string> Declarations { get; init; } = [];
+    public IReadOnlyList<StructDescriptor> PrivateScalarLayouts { get; init; } = [];
+    public IReadOnlyDictionary<string, string> EnumLayoutChecks { get; init; } = new Dictionary<string, string>();
     public static NativeSupportRequirements Merge(IEnumerable<NativeSupportRequirements> inputs)
     {
         var items = inputs.ToArray();
+        var enumChecks = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var check in items.SelectMany(i => i.EnumLayoutChecks))
+        {
+            if (enumChecks.TryGetValue(check.Key, out string? previous) && previous != check.Value)
+                throw new InvalidOperationException("Conflicting enum ABI guesses for " + check.Key);
+            enumChecks[check.Key] = check.Value;
+        }
         return new() {
             Includes = items.SelectMany(i => i.Includes).Distinct(StringComparer.Ordinal).ToArray(),
             Libraries = items.SelectMany(i => i.Libraries).Distinct(StringComparer.Ordinal).ToArray(),
-            Declarations = items.SelectMany(i => i.Declarations).Distinct(StringComparer.Ordinal).ToArray()
+            Declarations = items.SelectMany(i => i.Declarations).Distinct(StringComparer.Ordinal).ToArray(),
+            EnumLayoutChecks = enumChecks,
+            PrivateScalarLayouts = items.SelectMany(i => i.PrivateScalarLayouts).Distinct().ToArray()
         };
     }
 }

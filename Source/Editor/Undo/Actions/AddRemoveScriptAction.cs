@@ -191,7 +191,7 @@ namespace FlaxEditor.Actions
                 script.OrderInParent = _orderInParent;
             _orderInParent = script.OrderInParent; // Ensure order is correct for script that want to use it later
             if (_prefabObjectId != Guid.Empty)
-                SceneObject.Internal_LinkPrefab(Object.GetUnmanagedPtr(script), ref _prefabId, ref _prefabObjectId);
+                script.LinkPrefab(in _prefabId, in _prefabObjectId);
             Editor.Instance.Scene.MarkSceneEdited(parentActor.Scene);
         }
     }

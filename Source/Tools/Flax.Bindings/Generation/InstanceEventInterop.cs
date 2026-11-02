@@ -200,12 +200,14 @@ internal static class InstanceEventInterop
             private static ulong {{stem}}Context;
             private static bool {{stem}}Accepting = true;
             private static readonly global::System.Collections.Concurrent.ConcurrentDictionary<ulong, {{stem}}State> {{stem}}Roots = {{stem}}CreateRoots();
-            private static ulong {{stem}}GetContext() {
+            private static unsafe ulong {{stem}}GetContext() {
                 lock ({{stem}}ContextGate) {
                     if (!{{stem}}Accepting) throw new global::System.ObjectDisposedException("Native event module");
                     if ({{stem}}Context == 0) {
-                        int status = {{stem}}NativeContext(global::System.Runtime.InteropServices.Marshal.GetFunctionPointerForDelegate({{stem}}Root), global::System.Runtime.InteropServices.Marshal.GetFunctionPointerForDelegate({{stem}}ClosedRoot), out {{stem}}Context);
+                        ulong createdContext = 0;
+                        int status = {{stem}}NativeContext(global::System.Runtime.InteropServices.Marshal.GetFunctionPointerForDelegate({{stem}}Root), global::System.Runtime.InteropServices.Marshal.GetFunctionPointerForDelegate({{stem}}ClosedRoot), &createdContext);
                         if (status != 0) throw new global::System.InvalidOperationException("Native event context failed with status " + status);
+                        {{stem}}Context = createdContext;
                     }
                     return {{stem}}Context;
                 }
@@ -233,15 +235,17 @@ internal static class InstanceEventInterop
                 private ulong context, cookie;
                 internal readonly {{runtime}}.Slot<{{action}}> Slot;
                 internal {{stem}}State({{ownerType}} owner) { this.owner = owner; Slot = new(Bind, Unbind, false); }
-                private void Bind() {
+                private unsafe void Bind() {
                     {{addressSetup}}
                     var nextContext = {{stem}}GetContext();
                     if (cookie != 0 && {{stem}}Roots.TryGetValue(cookie, out var previous) && global::System.Object.ReferenceEquals(previous, this)) {
                         Call(0, context, cookie, false); {{stem}}Roots.TryRemove(cookie, out _);
                     }
                     context = nextContext;
-                    int status = {{stem}}NativeTicket(context, out cookie);
+                    ulong createdCookie = 0;
+                    int status = {{stem}}NativeTicket(context, &createdCookie);
                     if (status != 0) throw new global::System.InvalidOperationException("Native event ticket failed with status " + status);
+                    cookie = createdCookie;
                     if (!{{stem}}Roots.TryAdd(cookie, this)) throw new global::System.InvalidOperationException("Duplicate event cookie");
                     try {
                         lock ({{stem}}ContextGate) { if (!{{stem}}Accepting) throw new global::System.ObjectDisposedException("Native event module"); }
@@ -264,9 +268,9 @@ internal static class InstanceEventInterop
             [global::System.Runtime.InteropServices.DllImport({{System.Text.Json.JsonSerializer.Serialize(library)}}, EntryPoint = {{System.Text.Json.JsonSerializer.Serialize(export)}}, ExactSpelling = true, CallingConvention = global::System.Runtime.InteropServices.CallingConvention.Cdecl)]
             private static extern int {{stem}}NativeBind(nint owner, ulong context, ulong cookie, nint callback, nint closed, int enable);
             [global::System.Runtime.InteropServices.DllImport({{System.Text.Json.JsonSerializer.Serialize(library)}}, EntryPoint = {{System.Text.Json.JsonSerializer.Serialize(export + "_Context")}}, ExactSpelling = true, CallingConvention = global::System.Runtime.InteropServices.CallingConvention.Cdecl)]
-            private static extern int {{stem}}NativeContext(nint callback, nint closed, out ulong context);
+            private static unsafe extern int {{stem}}NativeContext(nint callback, nint closed, ulong* context);
             [global::System.Runtime.InteropServices.DllImport({{System.Text.Json.JsonSerializer.Serialize(library)}}, EntryPoint = {{System.Text.Json.JsonSerializer.Serialize(export + "_Ticket")}}, ExactSpelling = true, CallingConvention = global::System.Runtime.InteropServices.CallingConvention.Cdecl)]
-            private static extern int {{stem}}NativeTicket(ulong context, out ulong cookie);
+            private static unsafe extern int {{stem}}NativeTicket(ulong context, ulong* cookie);
             [global::System.Runtime.InteropServices.DllImport({{System.Text.Json.JsonSerializer.Serialize(library)}}, EntryPoint = {{System.Text.Json.JsonSerializer.Serialize(export + "_Drain")}}, ExactSpelling = true, CallingConvention = global::System.Runtime.InteropServices.CallingConvention.Cdecl)]
             private static extern int {{stem}}NativeDrain(ulong context);
             """;

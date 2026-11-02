@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "Engine/Core/Collections/Array.h"
 #include "Engine/Scripting/ScriptingObject.h"
 #include "Engine/Platform/Window.h"
 #include "Engine/Tools/TextureTool/TextureTool.h"
@@ -16,11 +17,12 @@ namespace CSG
 /// <summary>
 /// The main managed editor class. Editor root object.
 /// </summary>
-API_CLASS(Namespace="FlaxEditor", Name="Editor", NoSpawn, NoConstructor) class FLAXENGINE_API ManagedEditor : private ScriptingObject
+API_CLASS(Namespace="FlaxEditor", Name="Editor", NoSpawn, NoConstructor) class FLAXENGINE_API ManagedEditor : public ScriptingObject
 {
     DECLARE_SCRIPTING_TYPE_NO_SPAWN(ManagedEditor);
     static Guid ObjectID;
 
+public:
     API_ENUM(Attributes="Flags", Internal) enum class StartupFlags
     {
         None = 0,
@@ -30,6 +32,7 @@ API_CLASS(Namespace="FlaxEditor", Name="Editor", NoSpawn, NoConstructor) class F
         Exit = 8,
     };
 
+public:
     struct InternalOptions
     {
         byte AutoReloadScriptsOnMainWindowFocus = 1;

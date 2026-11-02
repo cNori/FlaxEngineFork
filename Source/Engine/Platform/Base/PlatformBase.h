@@ -827,7 +827,7 @@ public:
     /// </summary>
     /// <param name="settings">The window settings.</param>
     /// <returns>The created native window object or null if failed.</returns>
-    API_FUNCTION() static Window* CreateWindow(API_PARAM(Ref) CreateWindowSettings& settings) = delete;
+    API_FUNCTION() static Window* CreateWindow(API_PARAM(Ref) const CreateWindowSettings& settings) = delete;
 
     /// <summary>
     /// Loads the library.

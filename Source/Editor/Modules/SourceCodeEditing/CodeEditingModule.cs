@@ -271,7 +271,7 @@ namespace FlaxEditor.Modules.SourceCodeEditing
         private unsafe void GetInBuildEditors()
         {
             var resultArray = stackalloc int[(int)CodeEditorTypes.MAX];
-            ScriptsBuilder.GetExistingEditors(resultArray, (int)CodeEditorTypes.MAX);
+            ScriptsBuilder.GetExistingEditors((nint)resultArray, (int)CodeEditorTypes.MAX);
             for (int i = 0; i < (int)CodeEditorTypes.MAX; i++)
             {
                 if (resultArray[i] != 0)

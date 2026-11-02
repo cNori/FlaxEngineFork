@@ -23,7 +23,7 @@ class PlatformTools;
 /// <summary>
 /// Game building options. Used as flags.
 /// </summary>
-API_ENUM(Attributes="Flags") enum class BuildOptions
+API_ENUM(Attributes="Flags", Namespace="FlaxEngine") enum class BuildOptions
 {
     /// <summary>
     /// No special options declared.
@@ -51,7 +51,7 @@ DECLARE_ENUM_OPERATORS(BuildOptions);
 /// <summary>
 /// Game build target platform.
 /// </summary>
-API_ENUM() enum class BuildPlatform
+API_ENUM(Namespace="FlaxEngine") enum class BuildPlatform
 {
     /// <summary>
     /// Windows (32-bit architecture)
@@ -153,7 +153,7 @@ API_ENUM() enum class BuildPlatform
 /// <summary>
 /// Game build configuration modes.
 /// </summary>
-API_ENUM() enum class BuildConfiguration
+API_ENUM(Namespace="FlaxEngine") enum class BuildConfiguration
 {
     /// <summary>
     /// Debug configuration. Without optimizations but with full debugging information.
