@@ -10,6 +10,7 @@
 #include "Engine/Scripting/ScriptingType.h"
 #include "Engine/Serialization/JsonFwd.h"
 #include "Types.h"
+struct RenderCollectionContext;
 
 class JsonWriter;
 class Engine;
@@ -174,6 +175,8 @@ public:
     /// <param name="renderContextBatch">The rendering context batch.</param>
     /// <param name="category">The actors category to draw (see SceneRendering::DrawCategory).</param>
     static void DrawActors(RenderContextBatch& renderContextBatch, byte category = 0);
+
+    static void Collect(RenderCollectionContext& renderCollectionContext);
 
     /// <summary>
     /// Collects all the post fx volumes.

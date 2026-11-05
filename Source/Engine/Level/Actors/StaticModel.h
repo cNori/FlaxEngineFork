@@ -3,6 +3,8 @@
 #pragma once
 
 #include "ModelInstanceActor.h"
+#include "Engine/Graphics/RendererV2/IVisualData.h"
+#include "Engine/Graphics/RendererV2/StaticMeshRenderData.h"
 #include "Engine/Content/Assets/Model.h"
 #include "Engine/Renderer/Lightmaps.h"
 
@@ -10,7 +12,7 @@
 /// Renders model on the screen.
 /// </summary>
 API_CLASS(Attributes="ActorContextMenu(\"New/Model\"), ActorToolbox(\"Visuals\")")
-class FLAXENGINE_API StaticModel : public ModelInstanceActor, IAssetReference
+class FLAXENGINE_API StaticModel : public ModelInstanceActor, IAssetReference, public IVisualData
 {
     DECLARE_SCENE_OBJECT(StaticModel);
 private:
@@ -190,4 +192,11 @@ protected:
     void OnEnable() override;
     void OnDisable() override;
     void WaitForModelLoad() override;
+
+    // Inherited via IVisualData
+    uint64 GetRenderTypeId() override;
+    void* GetBounds() override;
+    void* GetBoundsSphere() override;
+    // part of v2 renderer
+    void Collect(RenderCollectionContext& context) override;
 };

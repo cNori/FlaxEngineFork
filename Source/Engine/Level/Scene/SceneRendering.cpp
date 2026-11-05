@@ -139,6 +139,24 @@ void SceneRendering::Draw(RenderContextBatch& renderContextBatch, DrawCategory c
 #endif
 }
 
+void SceneRendering::Collect(RenderCollectionContext& renderCollectionContext)
+{
+    PROFILE_CPU();
+
+    // Keep registry storage stable while collecting. Callbacks must not add or remove actors.
+    ScopeReadLock lock(Locker);
+    for (int32 category = 0; category < DrawCategory::MAX; category++)
+    {
+        const auto& actors = Actors[category];
+        for (int32 index = 0; index < actors.Count(); index++)
+        {
+            Actor* actor = actors[index].Actor;
+            if (actor)
+                actor->Collect(renderCollectionContext);
+        }
+    }
+}
+
 void SceneRendering::CollectPostFxVolumes(RenderContext& renderContext)
 {
 #if SCENE_RENDERING_USE_PROFILER

@@ -1,6 +1,7 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Camera.h"
+#include "Engine/Platform/StringUtils.h"
 #include "Engine/Level/SceneObjectsFactory.h"
 #include "Engine/Core/Math/Matrix.h"
 #include "Engine/Core/Math/Double4x4.h"
@@ -341,6 +342,12 @@ void Camera::BeginPlay(SceneBeginData* data)
 
     // Base
     Actor::BeginPlay(data);
+}
+
+uint64 Camera::GetRenderTypeId()
+{
+    static const uint64 typeId = StringUtils::GetHashCode(TEXT("CameraActor"));
+    return typeId;
 }
 
 BoundingBox Camera::GetEditorBoundingBox() const

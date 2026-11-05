@@ -14,12 +14,13 @@
 #include "Engine/Graphics/Models/ModelInstanceEntry.h"
 #include "Engine/Content/Assets/Model.h"
 #endif
+#include "Engine/Graphics/RendererV2/RV2.h"
 
 /// <summary>
 /// Describes the camera projection and view. Provides information about how to render scene (viewport location and direction, etc.).
 /// </summary>
 API_CLASS(Sealed, Attributes="ActorContextMenu(\"New/Camera\"), ActorToolbox(\"Visuals\")")
-class FLAXENGINE_API Camera : public Actor
+class FLAXENGINE_API Camera : public Actor, public ICamera
 {
     DECLARE_SCENE_OBJECT(Camera);
 
@@ -280,4 +281,15 @@ protected:
 #if USE_EDITOR
     void BeginPlay(SceneBeginData* data) override;
 #endif
+
+    
+
+    // Inherited via ICamera
+    uint64 GetRenderTypeId() override;
+
+    // part of v2 renderer
+    void Collect(RenderCollectionContext& context) override
+    {
+        context.Compositor->Submit(context.Pipeline, static_cast<ICamera*>(this));
+    }
 };

@@ -127,6 +127,8 @@ public:
     /// <param name="category">The actors category to draw.</param>
     void Draw(RenderContextBatch& renderContextBatch, DrawCategory category = SceneDraw);
 
+    void Collect(RenderCollectionContext& renderCollectionContext);
+
     /// <summary>
     /// Collects the post fx volumes for the given rendering view.
     /// </summary>

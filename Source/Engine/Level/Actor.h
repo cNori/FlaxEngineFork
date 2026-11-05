@@ -11,6 +11,8 @@
 #include "Engine/Scripting/ScriptingObject.h"
 #include "Types.h"
 
+struct RenderCollectionContext;
+
 struct RenderView;
 struct RenderContext;
 struct RenderContextBatch;
@@ -778,6 +780,14 @@ public:
     /// </summary>
     /// <param name="renderContextBatch">The rendering context batch (eg, main view and shadow projections).</param>
     virtual void Draw(RenderContextBatch& renderContextBatch);
+
+    /// <summary>
+    /// Submits this actor's rendering data to the V2 renderer.
+    /// </summary>
+    /// <param name="renderCollectionContext">
+    /// The collection context providing the destination compositor and pipeline.
+    /// </param>
+    virtual void Collect(RenderCollectionContext& renderCollectionContext);
 
 #if USE_EDITOR
     /// <summary>

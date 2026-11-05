@@ -1503,6 +1503,10 @@ void Actor::Draw(RenderContextBatch& renderContextBatch)
 {
 }
 
+void Actor::Collect(RenderCollectionContext& renderCollectionContext)
+{
+}
+
 #if USE_EDITOR
 
 void Actor::OnDebugDraw()

@@ -10,6 +10,7 @@
 #include "Engine/Scripting/ScriptingType.h"
 #include "RenderView.h"
 
+class RenderCompositor;
 class GPUDevice;
 class GPUContext;
 class GPUTexture;
@@ -244,6 +245,13 @@ public:
     /// True if the task is used for custom scene rendering and default scene drawing into output should be skipped. Enable it if you use Render event and draw scene manually.
     /// </summary>
     API_FIELD() bool IsCustomRendering = false;
+
+    /// <summary>
+    /// Optional borrowed V2 compositor for this view. Replaces built-in scene rendering
+    /// when assigned. Configure an active pipeline before rendering and keep the
+    /// compositor, pipeline and stages alive until detached. Native-only for now.
+    /// </summary>
+    RenderCompositor* CompositorV2 = nullptr;
 
     /// <summary>
     /// Marks the next rendered frame as camera cut. Used to clear the temporal effects history and prevent visual artifacts blended from the previous frames.

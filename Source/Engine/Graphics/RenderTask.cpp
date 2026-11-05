@@ -1,6 +1,8 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "RenderTask.h"
+#include "RendererV2/RenderCompositor.h"
+#include "RendererV2/RenderCollectionContext.h"
 #include "RenderBuffers.h"
 #include "RenderContext.h"
 #include "GPUDevice.h"
@@ -426,7 +428,25 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 void SceneRenderTask::OnRender(GPUContext* context)
 {
     if (!IsCustomRendering && Buffers && Buffers->GetWidth() > 0)
-        Renderer::Render(this);
+    {
+        if (CompositorV2)
+        {
+            RenderOutputTarget target;
+            target.Color = GetOutputView();
+            target.View = GetOutputViewport();
+            CompositorV2->SetViewOutput(target);
+            if (CompositorV2->BeginCollection())
+            {
+                RenderCollectionContext collection = { CompositorV2, CompositorV2->GetActivePipeline() };
+                Level::Collect(collection);
+                CompositorV2->Execute(context);
+            }
+        }
+        else
+        {
+            Renderer::Render(this);
+        }
+    }
 
     RenderTask::OnRender(context);
 }

@@ -1,6 +1,8 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "StaticModel.h"
+#include "Engine/Graphics/RendererV2/RenderCollectionContext.h"
+#include "Engine/Graphics/RendererV2/RenderCompositor.h"
 #include "Engine/Core/Math/Rectangle.h"
 #include "Engine/Engine/Engine.h"
 #include "Engine/Content/Deprecated.h"
@@ -723,4 +725,27 @@ void StaticModel::WaitForModelLoad()
 {
     if (Model)
         Model->WaitForLoaded();
+}
+
+uint64 StaticModel::GetRenderTypeId()
+{
+    static uint64 ID = StringUtils::GetHashCode(TEXT("StaticModelActor"));
+    return ID;
+}
+
+void* StaticModel::GetBounds()
+{
+    return (void*)&GetBoundingBox();
+}
+
+void* StaticModel::GetBoundsSphere()
+{
+    return (void*)&this->GetBoundingSphere();
+}
+
+void StaticModel::Collect(RenderCollectionContext& context)
+{
+    if (!context.Compositor || !context.Pipeline || !Model || !Model->IsLoaded())
+        return;
+    context.Compositor->Submit(context.Pipeline, static_cast<IVisualData*>(this));
 }

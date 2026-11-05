@@ -1,6 +1,8 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "Renderer.h"
+#include "Engine/Graphics/RendererV2/RenderCompositor.h"
+#include "Engine/Graphics/RendererV2/DefaultPipeline.h"
 #include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUPass.h"
 #include "Engine/Graphics/RenderTargetPool.h"
@@ -77,6 +79,14 @@ void RenderInner(RenderContext& renderContext, RenderContextBatch& renderContext
 bool RendererService::Init()
 {
     PROFILE_MEM(Graphics);
+
+    //init crap
+    //magic flax maze bypass
+    MainRenderTask::Instance->CompositorV2 = New<RenderCompositor>();
+    //construct render pipeline here
+    auto defaultPipeline = MainRenderTask::Instance->CompositorV2->CreateRenderPipeline<DefaultPipeline>("DefaultPipeline");
+    MainRenderTask::Instance->CompositorV2->SetActivePipeline(defaultPipeline);
+
 
     // Register passes
     PassList.EnsureCapacity(64);

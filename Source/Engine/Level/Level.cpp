@@ -524,6 +524,20 @@ void Level::DrawActors(RenderContextBatch& renderContextBatch, byte category)
     }
 }
 
+void Level::Collect(RenderCollectionContext& renderCollectionContext)
+{
+    PROFILE_CPU();
+
+    //ScopeLock lock(ScenesLock);
+
+    for (Scene* scene : Scenes)
+    {
+        if (scene->IsActiveInHierarchy())
+            scene->Rendering.Collect(renderCollectionContext);
+    }
+}
+
+
 void Level::CollectPostFxVolumes(RenderContext& renderContext)
 {
     PROFILE_CPU();
