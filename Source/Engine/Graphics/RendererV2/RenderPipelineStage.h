@@ -65,7 +65,7 @@ public:
     /// <param name="viewpoint">The camera for this execution.</param>
     /// <param name="resources">Shared resources for this execution. Changes publish only on Completed.</param>
     /// <returns>Completed, Skipped, or Failed. Skipping rolls back table references, not GPU commands.</returns>
-    virtual StageResult Render(GPUContext* RefContext, Array<IVisualData*>& objects, ICamera* viewpoint, RenderResourceTable& resources);
+    virtual StageResult Render(GPUContext* RefContext, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources);
 
     virtual void OnEndFrame(GPUContext* RefContext);
 };

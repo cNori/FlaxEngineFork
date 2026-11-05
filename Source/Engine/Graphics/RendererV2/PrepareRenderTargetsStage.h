@@ -23,5 +23,5 @@ public:
     ~PrepareRenderTargetsStage();
     void SetSize(int32 width, int32 height);
     void OnBeginFrame(GPUContext* context) override;
-    StageResult Render(GPUContext* context, Array<IVisualData*>& objects, ICamera* viewpoint, RenderResourceTable& resources) override;
+    StageResult Render(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources) override;
 };

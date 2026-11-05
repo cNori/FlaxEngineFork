@@ -38,7 +38,6 @@ protected:
     friend class RenderCompositor;
     /// <summary>Registers a stage owned and destroyed by this runtime pipeline.</summary>
     bool AddOwnedStage(RenderPipelineStage* stage);
-    virtual void PrepareView(ICamera* viewpoint) {}
 private:
     Array<RenderPipelineStage*> Stages;
     Array<ICamera*> Viewpoints;
@@ -96,6 +95,9 @@ public:
     /// Routes a resource published with Set to a named input on another stage.
     /// </summary>
     bool LinkResource(RenderPipelineStage* source, const String& output, RenderPipelineStage* target, const String& input, bool required = true);
+
+    /// <summary>Returns the first stage assignable to the requested type, or null.</summary>
+    API_FUNCTION() RenderPipelineStage* GetStage(API_PARAM(Attributes="TypeReference(typeof(RenderPipelineStage))") const MClass* type) const;
 
     const Array<RenderPipelineStage*>& GetStages() const { return Stages; }
     const Array<PipelineConnection>& GetConnections() const { return Connections; }

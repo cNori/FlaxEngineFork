@@ -2,7 +2,6 @@
 
 #include "../DefaultPipeline.h"
 #include "../WorldWarpStage.h"
-#include "../RenderCameraData.h"
 #include "../PrepareRenderTargetsStage.h"
 #include "../CopyPipelineOutputStage.h"
 #include "../StaticMeshDrawStage.h"
@@ -23,12 +22,6 @@ DefaultPipeline::DefaultPipeline(const SpawnParams& params)
     LinkResource(PrepareStage, TEXT("Scene.Color"), CopyStage, TEXT("Scene.Color"));
     ConnectStages(WarpStage, DrawStage, true);
     ConnectStages(DrawStage, CopyStage);
-}
-
-void DefaultPipeline::PrepareView(ICamera* viewpoint)
-{
-    auto* camera = dynamic_cast<RenderCameraData*>(viewpoint);
-    WarpStage->SetOrigin(camera ? camera->Origin : Vector3::Zero);
 }
 
 void DefaultPipeline::BeginFrame(GPUContext* context)

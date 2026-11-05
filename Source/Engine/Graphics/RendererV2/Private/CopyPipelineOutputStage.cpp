@@ -14,7 +14,7 @@ void CopyPipelineOutputStage::SetTarget(const RenderOutputTarget& target)
     Target = target;
 }
 
-StageResult CopyPipelineOutputStage::Render(GPUContext* context, Array<IVisualData*>& objects, ICamera* viewpoint, RenderResourceTable& resources)
+StageResult CopyPipelineOutputStage::Render(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources)
 {
     auto color = resources.Get<GPUTexture>(TEXT("Scene.Color"));
     if (!Target.Color || !color || Target.View.Width <= 0 || Target.View.Height <= 0)

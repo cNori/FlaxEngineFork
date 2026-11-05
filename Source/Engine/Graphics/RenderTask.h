@@ -249,9 +249,12 @@ public:
     /// <summary>
     /// Optional borrowed V2 compositor for this view. Replaces built-in scene rendering
     /// when assigned. Configure an active pipeline before rendering and keep the
-    /// compositor, pipeline and stages alive until detached. Native-only for now.
+    /// compositor, pipeline and stages alive until detached.
     /// </summary>
     RenderCompositor* CompositorV2 = nullptr;
+
+    /// <summary>Gets the compositor assigned to this view, or null.</summary>
+    API_PROPERTY() RenderCompositor* GetRenderCompositor() const { return CompositorV2; }
 
     /// <summary>
     /// Marks the next rendered frame as camera cut. Used to clear the temporal effects history and prevent visual artifacts blended from the previous frames.

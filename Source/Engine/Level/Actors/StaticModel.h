@@ -194,9 +194,10 @@ protected:
     void WaitForModelLoad() override;
 
     // Inherited via IVisualData
-    uint64 GetRenderTypeId() override;
-    void* GetBounds() override;
-    void* GetBoundsSphere() override;
+    uint64 GetIVD_RenderTypeId() override;
+    void* GetIVD_Bounds() override;
+    void* GetIVD_WorldTransform() override;
+    void* GetIVD_BoundsSphere() override;
     // part of v2 renderer
     void Collect(RenderCollectionContext& context) override;
 };

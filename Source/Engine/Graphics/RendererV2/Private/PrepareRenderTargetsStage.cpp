@@ -49,7 +49,7 @@ void PrepareRenderTargetsStage::OnBeginFrame(GPUContext* context)
     Ready = true;
 }
 
-StageResult PrepareRenderTargetsStage::Render(GPUContext* context, Array<IVisualData*>& objects, ICamera* viewpoint, RenderResourceTable& resources)
+StageResult PrepareRenderTargetsStage::Render(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources)
 {
     if (Width <= 0 || Height <= 0)
         return StageResult::Skipped;

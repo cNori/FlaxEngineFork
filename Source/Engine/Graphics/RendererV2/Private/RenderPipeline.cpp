@@ -1,9 +1,10 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "../RenderPipeline.h"
+#include "Engine/Scripting/ManagedCLR/MClass.h"
 #include "../RenderPipelineStage.h"
-#include "../RenderCameraData.h"
-#include "Engine/Level/Actors/Camera.h"
+#include "../ICamera.h"
+#include "Engine/Core/Math/Transform.h"
 #include "Engine/Graphics/GPUContext.h"
 #include "Engine/Core/Log.h"
 #include "Engine/Profiler/Profiler.h"
@@ -54,6 +55,19 @@ bool RenderPipeline::AddStage(RenderPipelineStage* stage)
     Stages.Add(stage);
     GraphDirty = true;
     return true;
+}
+
+RenderPipelineStage* RenderPipeline::GetStage(const MClass* type) const
+{
+    if (!type)
+        return nullptr;
+    for (auto* stage : Stages)
+    {
+        const auto* stageClass = stage->GetClass();
+        if (stageClass && (stageClass == type || stageClass->IsSubClassOf(type)))
+            return stage;
+    }
+    return nullptr;
 }
 
 bool RenderPipeline::BeginCollection()
@@ -142,13 +156,8 @@ void RenderPipeline::Render(GPUContext* RefContext, const Array<ICamera*>& views
     V2ProfileScope pipelineProfile(NameTag);
     if (views.IsEmpty())
         return;
-    if (views.Count() == 1)
-    {
-        ExecuteView(RefContext, views[0]);
-        return;
-    }
 
-    // Preserve the collected inputs so filtering for one camera cannot affect another.
+    // Restore collected inputs after each view, including temporary stage substitutions.
     Array<Array<IVisualData*>> collected;
     collected.Resize(Stages.Count());
     for (int32 i = 0; i < Stages.Count(); i++)
@@ -170,20 +179,9 @@ void RenderPipeline::ExecuteView(GPUContext* RefContext, ICamera* viewpoint)
     if (!viewpoint)
         return;
 
-    RenderCameraData prepared;
-    if (auto camera = dynamic_cast<Camera*>(viewpoint))
-    {
-        prepared.Source = camera;
-        prepared.Origin = camera->GetPosition();
-        Matrix view, projection;
-        const Viewport viewport(0, 0, OutputTarget.View.Width, OutputTarget.View.Height);
-        camera->GetMatrices(view, projection, viewport, prepared.Origin);
-        Matrix::Multiply(view, projection, prepared.ViewProjection);
-        viewpoint = &prepared;
-    }
-    PrepareView(viewpoint);
-
     Resources.Clear();
+    Resources.ViewRect = OutputTarget.View;
+
     Array<GPUResource*, InlinedAllocation<16>> transfers;
     transfers.Resize(Connections.Count());
     for (auto& resource : transfers)
@@ -237,7 +235,10 @@ void RenderPipeline::ExecuteView(GPUContext* RefContext, ICamera* viewpoint)
             if (link.Target == stage && link.Input.HasChars())
                 Resources.StageInputs[link.Input] = transfers[edge];
         }
-        const auto result = stage->Render(RefContext, stage->Objects, viewpoint, Resources);
+        auto* stageViewpoint = viewpoint;
+        const auto result = stage->Render(RefContext, stage->Objects, stageViewpoint, Resources);
+        if (result == StageResult::Completed)
+            viewpoint = stageViewpoint;
         results[i] = result;
         if (result == StageResult::Completed)
         {

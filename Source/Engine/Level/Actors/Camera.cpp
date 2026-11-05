@@ -344,7 +344,29 @@ void Camera::BeginPlay(SceneBeginData* data)
     Actor::BeginPlay(data);
 }
 
-uint64 Camera::GetRenderTypeId()
+Matrix Camera::GetIC_Projection()
+{
+    Matrix projection;
+    // Adjust viewport rectangle
+    Viewport viewportRect = GetViewport();
+    viewportRect.Location += viewportRect.Size * Float2(ViewportRect.X, ViewportRect.Y);
+    viewportRect.Size *= Float2(ViewportRect.Z, ViewportRect.W);
+
+    // Create projection matrix
+    const float aspect = _customAspectRatio <= 0.0f ? viewportRect.GetAspectRatio() : _customAspectRatio;
+    if (_usePerspective)
+    {
+        Matrix::PerspectiveFov(_fov * DegreesToRadians, aspect, _near, _far, projection);
+    }
+    else
+    {
+        const float orthoSize = (_orthoSize > 0.0f ? _orthoSize : viewportRect.Height) * _orthoScale;
+        Matrix::Ortho(orthoSize * aspect, orthoSize, _near, _far, projection);
+    }
+    return projection;
+}
+
+uint64 Camera::GetIC_RenderTypeId()
 {
     static const uint64 typeId = StringUtils::GetHashCode(TEXT("CameraActor"));
     return typeId;

@@ -16,6 +16,7 @@ API_INTERFACE() class FLAXENGINE_API ICamera
     DECLARE_SCRIPTING_TYPE_MINIMAL(ICamera);
 public:
     virtual ~ICamera();
+    virtual ICamera* GetIC_Source() { return this; }
     /// <summary>
     /// Gets the tag used by pipeline stages to identify and filter camera data.
     /// </summary>
@@ -25,5 +26,7 @@ public:
     /// Distinct prefixes can allow comparisons to reject mismatches earlier,
     /// but do not guarantee negligible filtering cost.
     /// </remarks>
-    API_FUNCTION() virtual uint64 GetRenderTypeId() = 0;
+    API_FUNCTION() virtual uint64 GetIC_RenderTypeId() = 0;
+    API_FUNCTION() virtual void* GetIC_WorldTransform() = 0;
+    API_FUNCTION() virtual Matrix GetIC_Projection() = 0;
 };

@@ -1,7 +1,6 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "../StaticMeshDrawStage.h"
-#include "../RenderCameraData.h"
 #include "../WorldWarpStage.h"
 #include "Engine/Level/Actors/StaticModel.h"
 #include "Engine/Content/Content.h"
@@ -95,16 +94,17 @@ void RenderPipelineDrawStage::OnBeginFrame(GPUContext* context)
     Ready = true;
 }
 
-StageResult RenderPipelineDrawStage::Render(GPUContext* context, Array<IVisualData*>& objects, ICamera* viewpoint, RenderResourceTable& resources)
+StageResult RenderPipelineDrawStage::Render(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources)
 {
     auto color = resources.Get<GPUTexture>(TEXT("Scene.Color"));
     auto depth = resources.Get<GPUTexture>(TEXT("Scene.Depth"));
     if (!Ready || !color || !depth)
         return StageResult::Skipped;
 
-    auto camera = dynamic_cast<RenderCameraData*>(viewpoint);
-    if (!camera)
-        return StageResult::Skipped;
+    auto warpedViewpoint = dynamic_cast<WarpedViewpoint*>(viewpoint);
+    if (!warpedViewpoint)
+        return StageResult::Failed;
+
     auto cb = ShaderAsset->GPU->GetCB(0);
     if (!cb || cb->GetSize() != sizeof(DrawConstants))
         return StageResult::Failed;
@@ -120,12 +120,13 @@ StageResult RenderPipelineDrawStage::Render(GPUContext* context, Array<IVisualDa
 
     for (auto object : objects)
     {
-        const auto* warped = dynamic_cast<WarpedStaticMesh*>(object);
-        if (warped)
-            object = warped->Source;
-        if (!object || object->GetRenderTypeId() != StaticModelActorRenderTypeID)
+        const auto* warped = dynamic_cast<WarpedVisualData*>(object);
+        if (!warped)
             continue;
-        auto actor = dynamic_cast<StaticModel*>(object);
+        auto* source = object->GetIVD_Source();
+        if (!source || source->GetIVD_RenderTypeId() != StaticModelActorRenderTypeID)
+            continue;
+        auto* actor = dynamic_cast<StaticModel*>(source);
         if (!actor)
             continue;
         auto model = actor->Model.Get();
@@ -135,11 +136,8 @@ StageResult RenderPipelineDrawStage::Render(GPUContext* context, Array<IVisualDa
         if (lod < 0 || lod >= model->LODs.Count())
             continue;
 
-        const auto& transform = warped ? warped->LocalTransform : actor->GetTransform();
-        Matrix world, worldViewProjection;
-        const Float3 translation(warped ? transform.Translation : transform.Translation - camera->Origin);
-        Matrix::Transformation(transform.Scale, transform.Orientation, translation, world);
-        Matrix::Multiply(world, camera->ViewProjection, worldViewProjection);
+        Matrix worldViewProjection;
+        Matrix::Multiply(warped->WorldMatrix, warpedViewpoint->ViewProjection, worldViewProjection);
         DrawConstants data = {};
         Matrix::Transpose(worldViewProjection, data.ViewProjection);
         data.SceneDepthUVScale = Float2::One;

@@ -22,7 +22,7 @@ RenderPipelineStage::RenderPipelineStage(const String& InNameTag)
 void RenderPipelineStage::OnBeginFrame(GPUContext* RefContext)
 {}
 
-StageResult RenderPipelineStage::Render(GPUContext* RefContext, Array<IVisualData*>& objects, ICamera* viewpoint, RenderResourceTable& resources)
+StageResult RenderPipelineStage::Render(GPUContext* RefContext, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources)
 {
     return StageResult::Skipped;
 }

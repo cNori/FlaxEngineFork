@@ -284,8 +284,11 @@ protected:
 
     
 
+public:
     // Inherited via ICamera
-    uint64 GetRenderTypeId() override;
+    uint64 GetIC_RenderTypeId() override;
+    Matrix GetIC_Projection() override;
+    void* GetIC_WorldTransform() override { return (void*)&GetTransform(); }
 
     // part of v2 renderer
     void Collect(RenderCollectionContext& context) override

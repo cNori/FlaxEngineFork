@@ -727,18 +727,23 @@ void StaticModel::WaitForModelLoad()
         Model->WaitForLoaded();
 }
 
-uint64 StaticModel::GetRenderTypeId()
+uint64 StaticModel::GetIVD_RenderTypeId()
 {
     static uint64 ID = StringUtils::GetHashCode(TEXT("StaticModelActor"));
     return ID;
 }
 
-void* StaticModel::GetBounds()
+void* StaticModel::GetIVD_WorldTransform()
+{
+    return (void*)&GetTransform();
+}
+
+void* StaticModel::GetIVD_Bounds()
 {
     return (void*)&GetBoundingBox();
 }
 
-void* StaticModel::GetBoundsSphere()
+void* StaticModel::GetIVD_BoundsSphere()
 {
     return (void*)&this->GetBoundingSphere();
 }

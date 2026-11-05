@@ -1,10 +1,12 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
-#include "../RenderCameraData.h"
+#include "../WorldWarpStage.h"
 #include "Engine/Platform/StringUtils.h"
 
-uint64 RenderCameraData::GetRenderTypeId()
+uint64 WarpedViewpoint::GetIC_RenderTypeId()
 {
-    static const uint64 typeId = StringUtils::GetHashCode(TEXT("RenderCameraData"));
+    if (Source)
+        return Source->GetIC_RenderTypeId();
+    static const uint64 typeId = StringUtils::GetHashCode(TEXT("WarpedCamera"));
     return typeId;
 }

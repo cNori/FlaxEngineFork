@@ -13,5 +13,5 @@ private:
     RenderOutputTarget Target;
 public:
     void SetTarget(const RenderOutputTarget& target);
-    StageResult Render(GPUContext* context, Array<IVisualData*>& objects, ICamera* viewpoint, RenderResourceTable& resources) override;
+    StageResult Render(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources) override;
 };

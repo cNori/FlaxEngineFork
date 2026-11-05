@@ -14,7 +14,6 @@ API_CLASS() class FLAXENGINE_API DefaultPipeline : public RenderPipeline
     DECLARE_SCRIPTING_TYPE(DefaultPipeline);
 private:
     WorldWarpStage* WarpStage = nullptr;
-    void PrepareView(ICamera* viewpoint) override;
     PrepareRenderTargetsStage* PrepareStage = nullptr;
     CopyPipelineOutputStage* CopyStage = nullptr;
     RenderPipelineDrawStage* DrawStage = nullptr;

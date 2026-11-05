@@ -16,6 +16,9 @@ API_INTERFACE() class FLAXENGINE_API IVisualData
     DECLARE_SCRIPTING_TYPE_MINIMAL(IVisualData);
 public:
     virtual ~IVisualData();
+
+    /// <summary>Returns the borrowed owner of the underlying render data.</summary>
+    virtual IVisualData* GetIVD_Source() { return this; }
     /// <summary>
     /// Gets the tag used by pipeline stages to identify and filter visual data.
     /// </summary>
@@ -25,7 +28,7 @@ public:
     /// Stages must understand that format before interpreting opaque pointers.
     /// Distinct prefixes can allow comparisons to reject mismatches earlier.
     /// </remarks>
-    API_FUNCTION() virtual uint64 GetRenderTypeId() = 0;
+    API_FUNCTION() virtual uint64 GetIVD_RenderTypeId() = 0;
 
     /// <summary>
     /// Gets the object's bounds using the format defined by its data contract.
@@ -38,7 +41,12 @@ public:
     /// </para>
     /// <para>The render pipeline uses zero-copy access by default.</para>
     /// </returns>
-    API_FUNCTION() virtual void* GetBounds() = 0;
+    API_FUNCTION() virtual void* GetIVD_Bounds() = 0;
+
+    /// <summary>
+    /// Returns a borrowed pointer to the render transform for this view.
+    /// </summary>
+    API_FUNCTION() virtual void* GetIVD_WorldTransform() = 0;
 
     /// <summary>
     /// Gets the object's axis-aligned bounding box.
@@ -52,5 +60,5 @@ public:
     /// </para>
     /// <para>The render pipeline uses zero-copy access by default.</para>
     /// </returns>
-    API_FUNCTION() virtual void* GetBoundsSphere() = 0;
+    API_FUNCTION() virtual void* GetIVD_BoundsSphere() = 0;
 };

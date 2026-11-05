@@ -65,6 +65,7 @@ void RenderResourceTable::EndStage(bool commit)
 
 void RenderResourceTable::Clear()
 {
+    ViewRect = Viewport();
     Pending.Clear();
     Resources.Clear();
     Outputs.Clear();
