@@ -155,6 +155,12 @@ void RenderCompositor::SetViewOutput(const RenderOutputTarget& target)
         ActivePipe->SetOutputTarget(target);
 }
 
+void RenderCompositor::SubmitLight(RenderPipeline* pipeline, ILightData* light)
+{
+    if (pipeline && light && !IsExecuting && !pipeline->IsExecuting)
+        pipeline->Lights.Add(light);
+}
+
 bool RenderCompositor::BeginCollection()
 {
     if (IsExecuting || !ActivePipe || !ActivePipe->BeginCollection())

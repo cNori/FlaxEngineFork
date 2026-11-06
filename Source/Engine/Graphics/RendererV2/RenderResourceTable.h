@@ -4,9 +4,12 @@
 
 #include "Engine/Core/Collections/Dictionary.h"
 #include "Engine/Core/Types/String.h"
+#include "Engine/Core/Types/Span.h"
 #include "Engine/Core/Math/Vector3.h"
 #include "Engine/Core/Math/Viewport.h"
 #include "Engine/Graphics/GPUResource.h"
+
+class ILightData;
 
 /// <summary>
 /// Named, borrowed GPU resources shared within one pipeline execution.
@@ -23,6 +26,7 @@ private:
     Dictionary<String, GPUResource*> Outputs;
     Dictionary<String, GPUResource*> PendingOutputs;
     Viewport ViewRect;
+    Span<ILightData*> Lights;
     bool InStage = false;
     friend class RenderPipeline;
 
@@ -31,6 +35,9 @@ private:
     void Clear();
 public:
     const Viewport& GetViewRect() const { return ViewRect; }
+
+    /// <summary>Returns the borrowed local lights collected for this view.</summary>
+    Span<ILightData*> GetLights() const { return Lights; }
 
     /// <summary>Publishes or replaces a borrowed resource. Null removes the entry.</summary>
     void Set(const String& name, GPUResource* resource);

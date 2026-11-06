@@ -2,28 +2,16 @@
 
 #include "../StaticMeshDrawStage.h"
 #include "../WorldWarpStage.h"
-#include "Engine/Level/Actors/StaticModel.h"
-#include "Engine/Content/Content.h"
-#include "Engine/Content/Assets/Shader.h"
+#include "Engine/Content/Assets/MaterialBase.h"
 #include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUDevice.h"
-#include "Engine/Graphics/GPUBuffer.h"
-#include "Engine/Graphics/GPUPipelineState.h"
+#include "Engine/Graphics/RenderBuffers.h"
+#include "Engine/Graphics/RenderContext.h"
 #include "Engine/Graphics/Textures/GPUTexture.h"
-#include "Engine/Graphics/Shaders/GPUShader.h"
-#include "Engine/Graphics/Shaders/GPUVertexLayout.h"
-#include "Engine/Graphics/Shaders/GPUConstantBuffer.h"
-
-namespace
-{
-    // Matches the existing Shaders/Utils/DebugDraw constant buffer.
-    GPU_CB_STRUCT(DrawConstants {
-        Matrix ViewProjection;
-        Float2 SceneDepthUVScale;
-        float ClipPosZBias;
-        uint32 EnableDepthTest;
-    });
-}
+#include "Engine/Level/Actors/Camera.h"
+#include "Engine/Level/Actors/StaticModel.h"
+#include "Engine/Renderer/GBufferPass.h"
+#include "Engine/Renderer/RenderList.h"
 
 RenderPipelineDrawStage::RenderPipelineDrawStage(const SpawnParams& params)
     : RenderPipelineStage(params)
@@ -32,146 +20,121 @@ RenderPipelineDrawStage::RenderPipelineDrawStage(const SpawnParams& params)
 
 RenderPipelineDrawStage::~RenderPipelineDrawStage()
 {
-    if (ShaderAsset)
-        ShaderAsset->Reloading.Unbind<RenderPipelineDrawStage, &RenderPipelineDrawStage::OnShaderReloading>(this);
-    SAFE_DELETE_GPU_RESOURCE(State);
-    SAFE_DELETE_GPU_RESOURCE(ColorBuffer);
-}
-
-void RenderPipelineDrawStage::OnShaderReloading(Asset* asset)
-{
-    Ready = false;
-    if (State)
-        State->ReleaseGPU();
-}
-
-void RenderPipelineDrawStage::OnBeginFrame(GPUContext* context)
-{
-    Ready = false;
-    if (!ShaderAsset)
-    {
-        ShaderAsset = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/Utils/DebugDraw"));
-        if (ShaderAsset)
-            ShaderAsset->Reloading.Bind<RenderPipelineDrawStage, &RenderPipelineDrawStage::OnShaderReloading>(this);
-    }
-    if (!ShaderAsset || !ShaderAsset->IsLoaded() || !ShaderAsset->GPU)
-        return;
-    auto device = context->GetDevice();
-    if (!State)
-        State = device->CreatePipelineState();
-    if (!State)
-        return;
-    if (!State->IsValid())
-    {
-        auto desc = GPUPipelineState::Description::Default;
-        desc.VS = ShaderAsset->GPU->GetVS("VS");
-        desc.PS = ShaderAsset->GPU->GetPS("PS", 1);
-        desc.CullMode = CullMode::TwoSided;
-        if (State->Init(desc))
-            return;
-    }
-    if (!ColorBuffer)
-    {
-        // A single instance color, not a copy of the mesh's vertex data.
-        const Float4 color(0.75f, 0.8f, 0.9f, 1.0f);
-        Array<VertexElement, FixedAllocation<GPU_MAX_VS_ELEMENTS>> elements;
-        VertexElement e = {};
-        e.Type = VertexElement::Types::Color;
-        e.Format = PixelFormat::R32G32B32A32_Float;
-        e.PerInstance = 1;
-        elements.Add(e);
-        auto layout = GPUVertexLayout::Get(elements);
-        ColorBuffer = device->CreateBuffer(TEXT("V2 Diagnostic Mesh Color"));
-        if (!ColorBuffer)
-            return;
-        auto desc = GPUBufferDescription::Vertex(layout, sizeof(Float4), 1, &color);
-        if (ColorBuffer->Init(desc))
-        {
-            SAFE_DELETE_GPU_RESOURCE(ColorBuffer);
-            return;
-        }
-    }
-    Ready = true;
+    SAFE_DELETE_GPU_RESOURCE(EmissiveBuffer);
+    if (MaterialBuffers)
+        Delete(MaterialBuffers);
 }
 
 StageResult RenderPipelineDrawStage::Render(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources)
 {
-    auto color = resources.Get<GPUTexture>(TEXT("Scene.Color"));
-    auto depth = resources.Get<GPUTexture>(TEXT("Scene.Depth"));
-    if (!Ready || !color || !depth)
+    auto* color = resources.Get<GPUTexture>(TEXT("Scene.Color"));
+    const auto* warpedView = dynamic_cast<WarpedViewpoint*>(viewpoint);
+    if (!color || !warpedView)
         return StageResult::Skipped;
 
-    auto warpedViewpoint = dynamic_cast<WarpedViewpoint*>(viewpoint);
-    if (!warpedViewpoint)
+    // The existing GBuffer and draw-list executors record on the main context.
+    auto* device = context->GetDevice();
+    if (context != device->GetMainContext())
         return StageResult::Failed;
 
-    auto cb = ShaderAsset->GPU->GetCB(0);
-    if (!cb || cb->GetSize() != sizeof(DrawConstants))
-        return StageResult::Failed;
-    context->ResetRenderTarget();
-    context->ResetSR();
-    context->ResetUA();
-    context->SetViewportAndScissors((float)color->Width(), (float)color->Height());
-    context->SetRenderTarget(depth->View(), color->View());
-    context->SetState(State);
-    context->BindCB(0, cb);
-
-    static uint64 StaticModelActorRenderTypeID = StringUtils::GetHashCode(TEXT("StaticModelActor"));
-
-    for (auto object : objects)
+    if (!MaterialBuffers)
+        MaterialBuffers = New<RenderBuffers>();
+    if (MaterialBuffers->Init(color->Width(), color->Height()))
     {
-        const auto* warped = dynamic_cast<WarpedVisualData*>(object);
-        if (!warped)
-            continue;
-        auto* source = object->GetIVD_Source();
-        if (!source || source->GetIVD_RenderTypeId() != StaticModelActorRenderTypeID)
-            continue;
-        auto* actor = dynamic_cast<StaticModel*>(source);
-        if (!actor)
-            continue;
-        auto model = actor->Model.Get();
+        Delete(MaterialBuffers);
+        MaterialBuffers = nullptr;
+        return StageResult::Failed;
+    }
+
+    if (!EmissiveBuffer)
+        EmissiveBuffer = device->CreateTexture(TEXT("V2 Material Emissive"));
+    if (!EmissiveBuffer)
+        return StageResult::Failed;
+    if (EmissiveBuffer->Width() != color->Width() || EmissiveBuffer->Height() != color->Height() || !EmissiveBuffer->GetMemoryUsage())
+    {
+        const auto desc = GPUTextureDescription::New2D(color->Width(), color->Height(),
+            PixelFormat::R16G16B16A16_Float, GPUTextureFlags::ShaderResource | GPUTextureFlags::RenderTarget);
+        if (EmissiveBuffer->Init(desc))
+            return StageResult::Failed;
+    }
+
+    RenderContext materialContext;
+    materialContext.Buffers = MaterialBuffers;
+    materialContext.List = RenderList::GetFromPool();
+    auto& view = materialContext.View;
+    view.Pass = DrawPass::GBuffer;
+    view.Flags = ViewFlags::None;
+    view.SetUp(warpedView->View, warpedView->Projection);
+    view.Position = Float3(warpedView->LocalTransform.Translation);
+    view.Direction = Float3(Vector3::Transform(Vector3::Forward, warpedView->LocalTransform.Orientation));
+    auto* sourceView = viewpoint->GetIC_Source();
+    if (const auto* pose = static_cast<const Transform*>(sourceView->GetIC_WorldTransform()))
+        view.Origin = pose->Translation - warpedView->LocalTransform.Translation;
+    if (const auto* camera = dynamic_cast<Camera*>(sourceView))
+    {
+        view.Near = camera->GetNearPlane();
+        view.Far = camera->GetFarPlane();
+    }
+    view.PrevViewProjection = view.ViewProjection();
+    view.PrepareCache(materialContext, (float)color->Width(), (float)color->Height(), Float2::Zero);
+    materialContext.List->Init(materialContext);
+
+    for (auto* object : objects)
+    {
+        auto* warped = dynamic_cast<WarpedVisualData*>(object);
+        auto* actor = warped ? dynamic_cast<StaticModel*>(warped->GetIVD_Source()) : nullptr;
+        auto* model = actor ? actor->Model.Get() : nullptr;
         if (!model || !model->IsLoaded())
             continue;
         const int32 lod = model->HighestResidentLODIndex();
         if (lod < 0 || lod >= model->LODs.Count())
             continue;
 
-        Matrix worldViewProjection;
-        Matrix::Multiply(warped->WorldMatrix, warpedViewpoint->ViewProjection, worldViewProjection);
-        DrawConstants data = {};
-        Matrix::Transpose(worldViewProjection, data.ViewProjection);
-        data.SceneDepthUVScale = Float2::One;
-        context->UpdateCB(cb, &data);
-
-        // Bind only positions and a constant instance color for the diagnostic
-        // shader. No mesh vertex data is copied or uploaded here.
+        const auto& entries = actor->GetEntries();
         for (const auto& mesh : model->LODs[lod].Meshes)
         {
-            auto positions = mesh.GetVertexBuffer(0);
-            auto indices = mesh.GetIndexBuffer();
-            if (!positions || !indices || !mesh.GetTriangleCount())
+            const int32 slotIndex = mesh.GetMaterialSlotIndex();
+            if (slotIndex < 0 || slotIndex >= model->MaterialSlots.Count())
                 continue;
-            auto sourceLayout = positions->GetVertexLayout();
-            if (!sourceLayout)
+            MaterialBase* material = nullptr;
+            if (slotIndex < entries.Count())
+            {
+                const auto& entry = entries[slotIndex];
+                if (!entry.Visible)
+                    continue;
+                material = entry.Material.Get();
+            }
+            if (!material || !material->IsReady())
+                material = model->MaterialSlots[slotIndex].Material.Get();
+            if (!material || !material->IsReady())
+                material = device->GetDefaultMaterial();
+            if (!material || !material->IsReady())
                 continue;
-            auto position = sourceLayout->FindElement(VertexElement::Types::Position);
-            if (position.Type != VertexElement::Types::Position)
-                continue;
-            Array<VertexElement, FixedAllocation<GPU_MAX_VS_ELEMENTS>> elements;
-            position.Slot = 0;
-            elements.Add(position);
-            VertexElement vertexColor = {};
-            vertexColor.Type = VertexElement::Types::Color;
-            vertexColor.Format = PixelFormat::R32G32B32A32_Float;
-            vertexColor.Slot = 1;
-            vertexColor.PerInstance = 1;
-            elements.Add(vertexColor);
-            auto layout = GPUVertexLayout::Get(elements, true);
-            GPUBuffer* buffers[] = { positions, ColorBuffer };
-            context->BindVB(ToSpan(buffers, 2), nullptr, layout);
-            context->BindIB(indices);
-            context->DrawIndexed(mesh.GetTriangleCount() * 3);
+
+            mesh.Draw(materialContext, material, warped->WorldMatrix,
+                      actor->GetStaticFlags(), false, DrawPass::GBuffer, actor->GetPerInstanceRandom());
         }
     }
+
+    context->ResetRenderTarget();
+    context->ResetSR();
+    context->ResetUA();
+    constexpr auto listType = DrawCallsListType::GBufferNoDecals;
+    if (!materialContext.List->DrawCallsLists[(int32)listType].IsEmpty())
+        materialContext.List->SortDrawCalls(materialContext, false, listType, DrawPass::GBuffer);
+
+    GBufferPass::Instance()->Fill(materialContext, EmissiveBuffer);
+    RenderList::ReturnToPool(materialContext.List);
+
+    // Preview the material base color until the pipeline has a lighting pass.
+    context->ResetSR();
+    context->Draw(color, MaterialBuffers->GBuffer0);
+    context->ResetSR();
+    resources.Set(TEXT("Scene.Depth"), MaterialBuffers->DepthBuffer);
+    resources.Set(TEXT("Scene.Normals"), MaterialBuffers->GBuffer1);
+    resources.Set(TEXT("Scene.BaseColor"), MaterialBuffers->GBuffer0);
+    resources.Set(TEXT("Scene.Material"), MaterialBuffers->GBuffer2);
+    resources.Set(TEXT("Scene.Emissive"), EmissiveBuffer);
+    resources.SetOutput(TEXT("Depth"), MaterialBuffers->DepthBuffer);
     return StageResult::Completed;
 }

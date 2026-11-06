@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Light.h"
+#include "Engine/Graphics/RendererV2/ILightData.h"
 #include "Engine/Content/Assets/IESProfile.h"
 #include "Engine/Content/AssetReference.h"
 
@@ -10,7 +11,7 @@
 /// Point light emits light from point in all directions.
 /// </summary>
 API_CLASS(Attributes="ActorContextMenu(\"New/Lights/Point Light\"), ActorToolbox(\"Lights\")")
-class FLAXENGINE_API PointLight : public LightWithShadow
+class FLAXENGINE_API PointLight : public LightWithShadow, public ILightData
 {
     DECLARE_SCENE_OBJECT(PointLight);
 private:
@@ -92,6 +93,10 @@ private:
 public:
     // [LightWithShadow]
     void Draw(RenderContextBatch& renderContextBatch) override;
+    void Collect(RenderCollectionContext& context) override;
+
+    Vector3 GetILD_WorldPosition() const override { return GetPosition(); }
+    float GetILD_Range() const override { return GetScaledRadius(); }
 #if USE_EDITOR
     void OnDebugDraw() override;
     void OnDebugDrawSelected() override;

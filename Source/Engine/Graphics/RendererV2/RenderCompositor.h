@@ -70,6 +70,9 @@ public:
     void SetViewOutput(const RenderOutputTarget& target);
     bool BeginCollection();
 
+    /// <summary>Appends a borrowed light to the pipeline's light collection.</summary>
+    void SubmitLight(RenderPipeline* pipeline, ILightData* light);
+
     /// <summary>
     /// Gets the render pipeline.
     /// </summary>

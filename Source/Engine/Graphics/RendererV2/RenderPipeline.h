@@ -41,6 +41,7 @@ protected:
 private:
     Array<RenderPipelineStage*> Stages;
     Array<ICamera*> Viewpoints;
+    Array<ILightData*> Lights;
     void ExecuteView(GPUContext* context, ICamera* viewpoint);
     Array<RenderPipelineStage*> OwnedStages;
     Array<PipelineConnection> Connections;

@@ -75,6 +75,7 @@ bool RenderPipeline::BeginCollection()
     if (IsExecuting)
         return false;
     Viewpoints.Clear();
+    Lights.Clear();
     for (auto stage : Stages)
         stage->Objects.Clear();
     return true;
@@ -181,6 +182,7 @@ void RenderPipeline::ExecuteView(GPUContext* RefContext, ICamera* viewpoint)
 
     Resources.Clear();
     Resources.ViewRect = OutputTarget.View;
+    Resources.Lights = ToSpan(Lights);
 
     Array<GPUResource*, InlinedAllocation<16>> transfers;
     transfers.Resize(Connections.Count());

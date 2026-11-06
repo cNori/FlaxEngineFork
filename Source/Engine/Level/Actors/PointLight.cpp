@@ -1,6 +1,8 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "PointLight.h"
+#include "Engine/Graphics/RendererV2/RenderCollectionContext.h"
+#include "Engine/Graphics/RendererV2/RenderCompositor.h"
 #include "Engine/Content/Deprecated.h"
 #include "Engine/Graphics/RenderBuffers.h"
 #include "Engine/Graphics/RenderTask.h"
@@ -80,6 +82,12 @@ void PointLight::OnTransformChanged()
     LightWithShadow::OnTransformChanged();
 
     UpdateBounds();
+}
+
+void PointLight::Collect(RenderCollectionContext& context)
+{
+    if (context.Compositor)
+        context.Compositor->SubmitLight(context.Pipeline, this);
 }
 
 void PointLight::Draw(RenderContextBatch& renderContextBatch)

@@ -4,6 +4,7 @@
 
 #include "ICamera.h"
 #include "IVisualData.h"
+#include "ILightData.h"
 #include "RenderPipelineGraphicSettings.h"
 #include "RenderPipelineStage.h"
 #include "RenderPipeline.h"
