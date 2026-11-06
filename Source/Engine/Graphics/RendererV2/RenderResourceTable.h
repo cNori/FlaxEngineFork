@@ -10,6 +10,7 @@
 #include "Engine/Graphics/GPUResource.h"
 
 class ILightData;
+class RenderPipelineGraphicSettings;
 
 /// <summary>
 /// Named, borrowed GPU resources shared within one pipeline execution.
@@ -27,6 +28,7 @@ private:
     Dictionary<String, GPUResource*> PendingOutputs;
     Viewport ViewRect;
     Span<ILightData*> Lights;
+    const RenderPipelineGraphicSettings* GraphicsSettings = nullptr;
     bool InStage = false;
     friend class RenderPipeline;
 
@@ -38,6 +40,9 @@ public:
 
     /// <summary>Returns the borrowed local lights collected for this view.</summary>
     Span<ILightData*> GetLights() const { return Lights; }
+
+    /// <summary>Returns the borrowed, read-only settings for the current view.</summary>
+    const RenderPipelineGraphicSettings* GetGraphicsSettings() const { return GraphicsSettings; }
 
     /// <summary>Publishes or replaces a borrowed resource. Null removes the entry.</summary>
     void Set(const String& name, GPUResource* resource);

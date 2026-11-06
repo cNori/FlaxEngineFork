@@ -67,6 +67,7 @@ void RenderResourceTable::Clear()
 {
     ViewRect = Viewport();
     Lights = {};
+    GraphicsSettings = nullptr;
     Pending.Clear();
     Resources.Clear();
     Outputs.Clear();

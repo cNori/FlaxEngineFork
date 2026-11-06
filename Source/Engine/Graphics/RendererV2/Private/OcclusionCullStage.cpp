@@ -1,6 +1,7 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "../OcclusionCullStage.h"
+#include "../RenderPipelineGraphicSettings.h"
 #include "../WorldWarpStage.h"
 #include "Engine/Content/Assets/MaterialBase.h"
 #include "Engine/Content/Assets/Shader.h"
@@ -56,11 +57,14 @@ StageResult OcclusionCullStage::Render(GPUContext* context, Array<IVisualData*>&
     const auto* view = dynamic_cast<const WarpedViewpoint*>(viewpoint);
     auto* device = context->GetDevice();
     const auto& rect = resources.GetViewRect();
-    if (!Enabled || !view || objects.IsEmpty() || rect.Width <= 0 || rect.Height <= 0 ||
+    const auto* settings = resources.GetGraphicsSettings();
+    const bool enabled = settings ? settings->EnableOcclusionCulling : Enabled;
+    if (!enabled || !view || objects.IsEmpty() || rect.Width <= 0 || rect.Height <= 0 ||
         device->GetRendererType() != RendererType::DirectX11 || !device->Limits.HasCompute ||
         context != device->GetMainContext())
         return StageResult::Completed;
-    const bool indirect = UseIndirectDraws && device->Limits.HasDrawIndirect;
+    const bool indirect = (settings ? settings->UseIndirectOcclusionDraws : UseIndirectDraws) && device->Limits.HasDrawIndirect;
+    const int32 triangleLimit = settings ? settings->OccluderTriangleLimit : OccluderTriangleLimit;
 
     if (!ShaderAsset)
         ShaderAsset = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/Utils/Culling"));
@@ -119,7 +123,7 @@ StageResult OcclusionCullStage::Render(GPUContext* context, Array<IVisualData*>&
         const auto& entries = actor->GetEntries();
         for (const auto& mesh : model->LODs[lod].Meshes)
         {
-            if (mesh.GetTriangleCount() > OccluderTriangleLimit)
+            if (mesh.GetTriangleCount() > triangleLimit)
                 continue;
             const int32 slot = mesh.GetMaterialSlotIndex();
             if (slot < 0 || slot >= model->MaterialSlots.Count())

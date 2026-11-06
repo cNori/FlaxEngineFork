@@ -85,6 +85,11 @@ bool RendererService::Init()
     MainRenderTask::Instance->CompositorV2 = New<RenderCompositor>();
     //construct render pipeline here
     auto defaultPipeline = MainRenderTask::Instance->CompositorV2->CreateRenderPipeline<DefaultPipeline>("DefaultPipeline");
+    if (defaultPipeline)
+    {
+        if (const auto* graphicsSettings = GraphicsSettings::Get())
+            defaultPipeline->GraphicSettings = graphicsSettings->RendererV2Settings;
+    }
     MainRenderTask::Instance->CompositorV2->SetActivePipeline(defaultPipeline);
 
 

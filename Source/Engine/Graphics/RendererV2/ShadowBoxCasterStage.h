@@ -11,6 +11,7 @@ class FrustumCullStage;
 class OcclusionCullStage;
 class Shader;
 class GPUBuffer;
+class GPUDevice;
 class GPUTexture;
 class GPUPipelineState;
 class RenderBuffers;
@@ -37,9 +38,16 @@ private:
     GPUBuffer* IndirectArguments = nullptr;
     GPUTexture* DebugMask = nullptr;
     RenderBuffers* LightDepthBuffers = nullptr;
+    int32 RequestedAtlasWidth = 0;
+    int32 RequestedAtlasHeight = 0;
     GPUPipelineState* DebugState = nullptr;
     GPUPipelineState* ResolveState = nullptr;
+    GPUPipelineState* ShadowMaskState = nullptr;
+    GPUPipelineState* ShadowFilterState = nullptr;
+    GPUTexture* ShadowMask = nullptr;
+    GPUTexture* FilteredShadowMask = nullptr;
     void OnShaderReloading(Asset* asset);
+    int32 PrepareShadowAtlas(GPUDevice* device, int32 resolution, int32 farTileWidth);
 public:
     ~ShadowBoxCasterStage();
 
@@ -51,6 +59,27 @@ public:
 
     /// <summary>Submits expensive shadow draws using GPU selection without a CPU readback.</summary>
     API_FIELD() bool UseIndirectShadowDraws = true;
+
+    /// <summary>View-space distance of the high-detail directional shadow tier. Zero uses a single shadow map.</summary>
+    API_FIELD() float NearShadowDistance = 2000.0f;
+
+    /// <summary>Requested near-tile size, or full map size in single-map mode. Limited by the GPU and atlas layout.</summary>
+    API_FIELD(Attributes="Limit(512, 16384, 512)") int32 ShadowMapResolution = 2048;
+
+    /// <summary>Gets the allocated near-tile size, or full map size in single-map mode.</summary>
+    API_PROPERTY() int32 GetAllocatedShadowMapResolution() const;
+
+    /// <summary>Uses adaptive light-space sampling before falling back to the other filter modes.</summary>
+    API_FIELD() bool UseAdaptiveShadowFilter = true;
+
+    /// <summary>Adaptive filter radius in shadow-map texels.</summary>
+    API_FIELD() float AdaptiveShadowRadius = 2.5f;
+
+    /// <summary>Softens the directional shadow mask before applying lighting.</summary>
+    API_FIELD() bool UseScreenSpaceShadowFilter = true;
+
+    /// <summary>Directional light angular radius in degrees for contact-hardening shadows.</summary>
+    API_FIELD() float ShadowAngularRadius = 0.27f;
 
     /// <summary>Linear color and strength of the directional light used by the preview.</summary>
     API_FIELD() Color LightColor = Color::White;

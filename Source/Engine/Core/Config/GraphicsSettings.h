@@ -5,6 +5,8 @@
 #include "Engine/Core/Config/Settings.h"
 #include "Engine/Graphics/Enums.h"
 #include "Engine/Graphics/PostProcessSettings.h"
+#include "Engine/Content/JsonAssetReference.h"
+#include "Engine/Graphics/RendererV2/RenderPipelineGraphicSettings.h"
 
 class FontAsset;
 
@@ -53,6 +55,10 @@ public:
     /// </summary>
     API_FIELD(Attributes="EditorOrder(20), EditorDisplay(\"General\", \"Use V-Sync\")")
     bool UseVSync = false;
+
+    /// <summary>Graphics configuration loaded by the built-in V2 render pipeline at startup.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Renderer V2\", \"Pipeline Graphics Settings\")")
+    JsonAssetReference<RenderPipelineGraphicSettings> RendererV2Settings;
 
 public:
     /// <summary>

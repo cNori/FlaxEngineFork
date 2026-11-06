@@ -198,6 +198,9 @@ void RenderPipeline::ExecuteView(GPUContext* RefContext, ICamera* viewpoint)
         PROFILE_GPU_CPU_NAMED("Pipeline BeginFrame");
         BeginFrame(RefContext);
     }
+    const auto settingsAsset = GraphicSettings;
+    if (settingsAsset && settingsAsset->IsLoaded())
+        Resources.GraphicsSettings = settingsAsset.GetInstance();
     for (int32 i : ExecutionOrder)
     {
         PROFILE_GPU_CPU_NAMED("Stage BeginFrame");
@@ -273,6 +276,7 @@ void RenderPipeline::ExecuteView(GPUContext* RefContext, ICamera* viewpoint)
         PROFILE_GPU_CPU_NAMED("Pipeline EndFrame");
         EndFrame(RefContext);
     }
+    Resources.GraphicsSettings = nullptr;
 }
 
 
