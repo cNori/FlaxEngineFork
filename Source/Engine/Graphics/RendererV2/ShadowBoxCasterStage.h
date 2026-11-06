@@ -32,6 +32,9 @@ private:
     GPUBuffer* BoundsBuffer = nullptr;
     GPUBuffer* SelectionBuffer = nullptr;
     GPUBuffer* SelectionReadback = nullptr;
+    GPUBuffer* IndirectInputs = nullptr;
+    GPUBuffer* IndirectOutput = nullptr;
+    GPUBuffer* IndirectArguments = nullptr;
     GPUTexture* DebugMask = nullptr;
     RenderBuffers* LightDepthBuffers = nullptr;
     GPUPipelineState* DebugState = nullptr;
@@ -45,6 +48,9 @@ public:
 
     /// <summary>Overlays camera pixels reached by an expensive caster's box.</summary>
     API_FIELD() bool ShowReceiverHits = false;
+
+    /// <summary>Submits expensive shadow draws using GPU selection without a CPU readback.</summary>
+    API_FIELD() bool UseIndirectShadowDraws = true;
 
     /// <summary>Linear color and strength of the directional light used by the preview.</summary>
     API_FIELD() Color LightColor = Color::White;
@@ -62,7 +68,7 @@ public:
     /// <summary>The number of entries submitted for GPU selection in the last view.</summary>
     API_PROPERTY() int32 GetCasterCount() const { return LastCasterCount; }
 
-    /// <summary>Gets the number of expensive caster entries skipped by the last shadow draw.</summary>
+    /// <summary>Gets the number of expensive casters skipped by the CPU readback path.</summary>
     API_PROPERTY() int32 GetRejectedProxyCount() const { return LastRejectedProxyCount; }
 
     /// <summary>Whether the last shadow draw consumed the GPU selection results.</summary>

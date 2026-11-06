@@ -10,6 +10,7 @@
 #include "Engine/Graphics/RenderBuffers.h"
 #include "Engine/Graphics/RenderContext.h"
 #include "Engine/Graphics/Shaders/GPUShader.h"
+#include "Engine/Graphics/Shaders/GPUConstantBuffer.h"
 #include "Engine/Profiler/ProfilerCPU.h"
 #include "Engine/Profiler/ProfilerGPU.h"
 #include "Engine/Core/Config/GraphicsSettings.h"
@@ -164,7 +165,7 @@ void HZBOcclusionCulling::EndFrame(const RenderContext& renderContext)
 
 void HZBOcclusionCulling::Submit(const RenderContext& renderContext)
 {
-    if (_items.IsEmpty() || !_shader || !_shader->IsLoaded())
+    if (_items.IsEmpty() || !_shader || !_shader->IsLoaded() || !_shader->GPU)
         return;
     PROFILE_CPU();
     PROFILE_GPU("HZB Occlusion Culling");
@@ -208,6 +209,11 @@ void HZBOcclusionCulling::Submit(const RenderContext& renderContext)
     // Test all object bounds against current frame HZB
     auto cs = _shader->GPU->GetCS("CS_HZBCull");
     auto cb = _shader->GPU->GetCB(0);
+    if (!cs || !cb || cb->GetSize() != sizeof(OcclusionCullingData))
+    {
+        _submitFailed = true;
+        return;
+    }
     {
         OcclusionCullingData data;
         Matrix::Transpose(renderContext.View.ViewProjection(), data.ViewProjectionMatrix);

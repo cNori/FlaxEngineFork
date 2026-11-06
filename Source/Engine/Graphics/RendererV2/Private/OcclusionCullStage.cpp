@@ -56,11 +56,11 @@ StageResult OcclusionCullStage::Render(GPUContext* context, Array<IVisualData*>&
     const auto* view = dynamic_cast<const WarpedViewpoint*>(viewpoint);
     auto* device = context->GetDevice();
     const auto& rect = resources.GetViewRect();
-    // DX11's blocking Map synchronizes the copy. Explicit backends need a fence or GPU draws.
     if (!Enabled || !view || objects.IsEmpty() || rect.Width <= 0 || rect.Height <= 0 ||
         device->GetRendererType() != RendererType::DirectX11 || !device->Limits.HasCompute ||
         context != device->GetMainContext())
         return StageResult::Completed;
+    const bool indirect = UseIndirectDraws && device->Limits.HasDrawIndirect;
 
     if (!ShaderAsset)
         ShaderAsset = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/Utils/Culling"));
@@ -167,9 +167,9 @@ StageResult OcclusionCullStage::Render(GPUContext* context, Array<IVisualData*>&
         BoundsBuffer = device->CreateBuffer(TEXT("V2 Occlusion Bounds"));
     if (!ResultsBuffer)
         ResultsBuffer = device->CreateBuffer(TEXT("V2 Occlusion Results"));
-    if (!ReadbackBuffer)
+    if (!indirect && !ReadbackBuffer)
         ReadbackBuffer = device->CreateBuffer(TEXT("V2 Occlusion Readback"));
-    if (!BoundsBuffer || !ResultsBuffer || !ReadbackBuffer)
+    if (!BoundsBuffer || !ResultsBuffer || (!indirect && !ReadbackBuffer))
         return StageResult::Completed;
 
     const int32 count = bounds.Count();
@@ -177,7 +177,8 @@ StageResult OcclusionCullStage::Render(GPUContext* context, Array<IVisualData*>&
     if ((BoundsBuffer->GetElementsCount() < (uint32)count &&
          BoundsBuffer->Init(GPUBufferDescription::Structured(count, sizeof(OcclusionBounds)))) ||
         (ResultsBuffer->GetElementsCount() < (uint32)count && ResultsBuffer->Init(resultDesc)) ||
-        (ReadbackBuffer->GetSize() < resultDesc.Size && ReadbackBuffer->Init(resultDesc.ToStagingReadback())))
+        (!indirect && ReadbackBuffer->GetSize() < resultDesc.Size &&
+         ReadbackBuffer->Init(resultDesc.ToStagingReadback())))
         return StageResult::Completed;
 
     OcclusionConstants data;
@@ -195,6 +196,14 @@ StageResult OcclusionCullStage::Render(GPUContext* context, Array<IVisualData*>&
     context->Dispatch(shader, data.GroupsPerRow, Math::DivideAndRoundUp(data.Count, data.GroupsPerRow));
     context->ResetUA();
     context->ResetSR();
+
+    if (indirect)
+    {
+        // Indices in this buffer refer to the forwarded objects in their original order.
+        resources.Set(TEXT("Occlusion.Visibility"), ResultsBuffer);
+        return StageResult::Completed;
+    }
+
     context->CopyBuffer(ReadbackBuffer, ResultsBuffer, count * sizeof(uint32));
 
     int32 visibleCount = 0;

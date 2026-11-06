@@ -25,13 +25,16 @@ private:
 public:
     ~OcclusionCullStage();
 
-    /// <summary>Enables depth occlusion with same-frame readback on DirectX 11.</summary>
+    /// <summary>Enables camera depth occlusion on DirectX 11.</summary>
     API_FIELD() bool Enabled = true;
+
+    /// <summary>Feeds visibility flags to indirect draws. Disable to compare with synchronous readback.</summary>
+    API_FIELD() bool UseIndirectDraws = true;
 
     /// <summary>Maximum triangle count for a mesh to contribute to the depth prepass.</summary>
     API_FIELD() int32 OccluderTriangleLimit = 4096;
 
-    /// <summary>Gets the number of objects occluded in the last view.</summary>
+    /// <summary>Gets the number of objects culled by CPU readback in the last view.</summary>
     API_PROPERTY() int32 GetOccludedCount() const { return LastOccludedCount; }
 
     /// <summary>Gets the borrowed objects hidden in the current view.</summary>

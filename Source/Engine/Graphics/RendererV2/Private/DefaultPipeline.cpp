@@ -37,6 +37,7 @@ DefaultPipeline::DefaultPipeline(const SpawnParams& params)
     LinkResource(DrawStage, TEXT("Scene.Depth"), shadowBoxCasterStage, TEXT("Shadow.ReceiverDepth"));
     LinkResource(DrawStage, TEXT("Scene.Normals"), shadowBoxCasterStage, TEXT("Shadow.ReceiverNormals"), false);
     ConnectStages(occlusionCullStage, DrawStage, true);
+    LinkResource(occlusionCullStage, TEXT("Occlusion.Visibility"), DrawStage, TEXT("Occlusion.Visibility"), false);
     ConnectStages(DrawStage, CopyStage);
     ConnectStages(shadowBoxCasterStage, CopyStage);
 }

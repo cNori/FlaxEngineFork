@@ -7,6 +7,7 @@
 #include "Engine/Content/Assets/Shader.h"
 #include "Engine/Content/Assets/MaterialBase.h"
 #include "Engine/Content/Content.h"
+#include "Engine/Core/Math/BoundingFrustum.h"
 #include "Engine/Graphics/GPUBuffer.h"
 #include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUDevice.h"
@@ -22,6 +23,18 @@
 
 namespace
 {
+    struct ShadowSweepPlane
+    {
+        Plane Boundary;
+        Real SweepDelta;
+    };
+
+    struct IndirectShadowInput
+    {
+        uint32 CasterIndex;
+        uint32 IndexCount;
+    };
+
     struct CasterBounds
     {
         Float3 Minimum;
@@ -30,6 +43,36 @@ namespace
         uint32 DebugCategory;
     };
     static_assert(sizeof(CasterBounds) == 32, "Caster bounds must match the shader layout.");
+
+    bool CanReachView(const CasterBounds& box, const ShadowSweepPlane (&planes)[6])
+    {
+        Real enter = 0;
+        Real leave = 1;
+        for (const auto& sweepPlane : planes)
+        {
+            const auto& plane = sweepPlane.Boundary;
+            const auto& normal = plane.Normal;
+            const Vector3 furthest(
+                normal.X >= 0 ? box.Maximum.X : box.Minimum.X,
+                normal.Y >= 0 ? box.Maximum.Y : box.Minimum.Y,
+                normal.Z >= 0 ? box.Maximum.Z : box.Minimum.Z);
+
+            // For a hit, the box must reach the inside of every plane at a common
+            // point along the sweep. Use its support point to keep this conservative.
+            const Real distance = Vector3::Dot(normal, furthest) + plane.D + Plane::DistanceEpsilon;
+            const Real delta = sweepPlane.SweepDelta;
+            if (delta > 0)
+                enter = Math::Max(enter, -distance / delta);
+            else if (delta < 0)
+                leave = Math::Min(leave, -distance / delta);
+            else if (distance < 0)
+                return false;
+
+            if (enter > leave)
+                return false;
+        }
+        return true;
+    }
 
     GPU_CB_STRUCT(ResolveConstants
     {
@@ -74,6 +117,9 @@ ShadowBoxCasterStage::~ShadowBoxCasterStage()
     SAFE_DELETE_GPU_RESOURCE(DebugState);
     SAFE_DELETE_GPU_RESOURCE(ResolveState);
     SAFE_DELETE_GPU_RESOURCE(SelectionReadback);
+    SAFE_DELETE_GPU_RESOURCE(IndirectInputs);
+    SAFE_DELETE_GPU_RESOURCE(IndirectOutput);
+    SAFE_DELETE_GPU_RESOURCE(IndirectArguments);
     SAFE_DELETE_GPU_RESOURCE(DebugMask);
     if (LightDepthBuffers)
         Delete(LightDepthBuffers);
@@ -123,6 +169,16 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     if (!shader || !constants || constants->GetSize() != sizeof(SelectionConstants))
         return StageResult::Skipped;
 
+    const BoundingFrustum frustum(view->ViewProjection);
+    const Vector3 sweepOffset(Float3(LightDirection) * ProjectionDistance);
+    ShadowSweepPlane sweepPlanes[6];
+    for (int32 i = 0; i < ARRAY_COUNT(sweepPlanes); i++)
+    {
+        auto& sweepPlane = sweepPlanes[i];
+        sweepPlane.Boundary = frustum.GetPlane(i);
+        sweepPlane.SweepDelta = Vector3::Dot(sweepPlane.Boundary.Normal, sweepOffset);
+    }
+
     Array<CasterBounds> bounds;
     const auto append = [&](const Array<IVisualData*>& candidates, uint32 debugCategory)
     {
@@ -148,6 +204,8 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
             entry.Maximum = Float3(warped->Bounds.Maximum);
             entry.UseProxy = triangles > ProxyTriangleThreshold ? 1 : 0;
             entry.DebugCategory = debugCategory;
+            if (entry.UseProxy && !CanReachView(entry, sweepPlanes))
+                continue;
             bounds.Add(entry);
             Casters.Add(object);
         }
@@ -206,11 +264,14 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     SelectionConstants data = {};
     GPUTexture* lightDepth = nullptr;
     RenderContext lightContext;
-    const auto drawShadowDepth = [&](bool proxies, const uint32* selected)
+    const auto drawShadowDepth = [&](bool proxies, const uint32* selected, bool indirect)
     {
         PROFILE_GPU_CPU_NAMED("V2 Shadow Depth");
         lightContext.List = RenderList::GetFromPool();
         lightContext.List->Init(lightContext);
+        Array<IndirectShadowInput> drawInputs;
+        if (indirect)
+            drawInputs.Add({ 0, 0 }); // Header stores the live draw count.
         for (int32 i = 0; i < count; i++)
         {
             if ((bounds[i].UseProxy != 0) != proxies || (selected && !selected[i]))
@@ -230,8 +291,53 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                 if (!material || !material->IsReady() ||
                     !EnumHasAllFlags(material->GetDrawModes(), DrawPass::Depth | DrawPass::GBuffer))
                     continue;
+                const int32 drawIndex = lightContext.List->DrawCalls.Count();
                 mesh.Draw(lightContext, material, warped->WorldMatrix, actor->GetStaticFlags(),
                           false, DrawPass::Depth, actor->GetPerInstanceRandom());
+                if (indirect && lightContext.List->DrawCalls.Count() > drawIndex)
+                    drawInputs.Add({ (uint32)i, (uint32)lightContext.List->DrawCalls.Get()[drawIndex].Draw.IndicesCount });
+            }
+        }
+
+        if (drawInputs.Count() > 1)
+        {
+            PROFILE_GPU_CPU_NAMED("V2 Shadow Indirect Arguments");
+            auto* buildArgs = SelectionShader->GPU->GetCS("CS_V2ShadowIndirectArgs");
+            if (!IndirectInputs)
+                IndirectInputs = device->CreateBuffer(TEXT("V2 Shadow Indirect Inputs"));
+            if (!IndirectOutput)
+                IndirectOutput = device->CreateBuffer(TEXT("V2 Shadow Indirect Output"));
+            if (!IndirectArguments)
+                IndirectArguments = device->CreateBuffer(TEXT("V2 Shadow Indirect Arguments"));
+            const int32 drawCount = drawInputs.Count() - 1;
+            const int32 bytes = drawCount * sizeof(GPUDrawIndexedIndirectArgs);
+            if (buildArgs &&
+                IndirectInputs && IndirectOutput && IndirectArguments &&
+                (IndirectInputs->GetElementsCount() >= (uint32)drawInputs.Count() ||
+                 !IndirectInputs->Init(GPUBufferDescription::Structured(drawInputs.Count(), sizeof(IndirectShadowInput)))) &&
+                (IndirectOutput->GetSize() >= (uint32)bytes ||
+                 !IndirectOutput->Init(GPUBufferDescription::Typed(bytes / sizeof(uint32), PixelFormat::R32_UInt, true))) &&
+                (IndirectArguments->GetSize() >= (uint32)bytes ||
+                 !IndirectArguments->Init(GPUBufferDescription::Argument(bytes))))
+            {
+                drawInputs[0].CasterIndex = drawCount;
+                context->UpdateBuffer(IndirectInputs, drawInputs.Get(), drawInputs.Count() * sizeof(IndirectShadowInput));
+                context->BindSR(0, SelectionBuffer->View());
+                context->BindSR(1, IndirectInputs->View());
+                context->BindUA(0, IndirectOutput->View());
+                context->Dispatch(buildArgs, Math::DivideAndRoundUp(drawCount, 64));
+                context->ResetUA();
+                context->ResetSR();
+                context->CopyBuffer(IndirectArguments, IndirectOutput, bytes);
+
+                auto* draws = lightContext.List->DrawCalls.Get();
+                for (int32 i = 0; i < drawCount; i++)
+                {
+                    draws[i].InstanceCount = 0;
+                    draws[i].Draw.IndirectArgsBuffer = IndirectArguments;
+                    draws[i].Draw.IndirectArgsOffset = i * sizeof(GPUDrawIndexedIndirectArgs);
+                }
+                LastUsedSelection = true;
             }
         }
 
@@ -298,7 +404,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
             lightDepth = LightDepthBuffers->DepthBuffer;
             Matrix::Transpose(lightContext.View.ViewProjection(), data.LightViewProjection);
             data.HasLightDepth = 1;
-            drawShadowDepth(false, nullptr);
+            drawShadowDepth(false, nullptr, false);
         }
     }
     Matrix inverse;
@@ -332,7 +438,10 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         context->ClearUA(DebugMask, clear);
         context->BindUA(2, DebugMask->View());
     }
-    context->Dispatch(shader, data.GroupsPerRow, Math::DivideAndRoundUp(data.CasterCount, data.GroupsPerRow));
+    {
+        PROFILE_GPU_CPU_NAMED("V2 Shadow Receiver Selection");
+        context->Dispatch(shader, data.GroupsPerRow, Math::DivideAndRoundUp(data.CasterCount, data.GroupsPerRow));
+    }
     context->ResetUA();
     context->ResetSR();
 
@@ -351,7 +460,8 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     if (!ShowReceiverHits && sceneColor && lightDepth)
     {
         Array<uint32> selected;
-        if (device->GetRendererType() == RendererType::DirectX11)
+        const bool indirect = UseIndirectShadowDraws && device->Limits.HasDrawIndirect;
+        if (!indirect && device->GetRendererType() == RendererType::DirectX11)
         {
             if (!SelectionReadback)
                 SelectionReadback = device->CreateBuffer(TEXT("V2 Shadow Selection Readback"));
@@ -378,7 +488,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                 if (bounds[i].UseProxy && selected[i] == 0)
                     LastRejectedProxyCount++;
         }
-        drawShadowDepth(true, LastUsedSelection ? selected.Get() : nullptr);
+        drawShadowDepth(true, LastUsedSelection ? selected.Get() : nullptr, indirect);
 
         auto* baseColor = resources.Get<GPUTexture>(TEXT("Scene.BaseColor"));
         auto* material = resources.Get<GPUTexture>(TEXT("Scene.Material"));

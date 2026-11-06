@@ -3,13 +3,18 @@
 #include "../StaticMeshDrawStage.h"
 #include "../WorldWarpStage.h"
 #include "Engine/Content/Assets/MaterialBase.h"
+#include "Engine/Content/Assets/Shader.h"
+#include "Engine/Content/Content.h"
+#include "Engine/Graphics/GPUBuffer.h"
 #include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUDevice.h"
 #include "Engine/Graphics/RenderBuffers.h"
 #include "Engine/Graphics/RenderContext.h"
+#include "Engine/Graphics/Shaders/GPUShader.h"
 #include "Engine/Graphics/Textures/GPUTexture.h"
 #include "Engine/Level/Actors/Camera.h"
 #include "Engine/Level/Actors/StaticModel.h"
+#include "Engine/Profiler/Profiler.h"
 #include "Engine/Renderer/GBufferPass.h"
 #include "Engine/Renderer/RenderList.h"
 
@@ -21,8 +26,72 @@ RenderPipelineDrawStage::RenderPipelineDrawStage(const SpawnParams& params)
 RenderPipelineDrawStage::~RenderPipelineDrawStage()
 {
     SAFE_DELETE_GPU_RESOURCE(EmissiveBuffer);
+    SAFE_DELETE_GPU_RESOURCE(IndirectInputs);
+    SAFE_DELETE_GPU_RESOURCE(IndirectOutput);
+    SAFE_DELETE_GPU_RESOURCE(IndirectArguments);
     if (MaterialBuffers)
         Delete(MaterialBuffers);
+}
+
+void RenderPipelineDrawStage::BuildIndirectDraws(GPUContext* context, GPUBuffer* visibility, RenderList* list, const Array<uint32>& objectIndices)
+{
+    const int32 count = objectIndices.Count();
+    if (count == 0 || count > 65535 * 64 || count != list->DrawCalls.Count())
+        return;
+    PROFILE_GPU_CPU_NAMED("V2 Camera Indirect Arguments");
+    if (!CullingShader)
+        CullingShader = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/Utils/Culling"));
+    auto* shader = CullingShader && CullingShader->IsLoaded() && CullingShader->GPU
+        ? CullingShader->GPU->GetCS("CS_V2ShadowIndirectArgs") : nullptr;
+    if (!shader)
+        return;
+
+    auto* device = context->GetDevice();
+    if (!IndirectInputs)
+        IndirectInputs = device->CreateBuffer(TEXT("V2 Camera Indirect Inputs"));
+    if (!IndirectOutput)
+        IndirectOutput = device->CreateBuffer(TEXT("V2 Camera Indirect Output"));
+    if (!IndirectArguments)
+        IndirectArguments = device->CreateBuffer(TEXT("V2 Camera Indirect Arguments"));
+
+    // Reuse the shadow argument kernel. The header carries the live draw count.
+    struct IndirectInput
+    {
+        uint32 ObjectIndex;
+        uint32 IndexCount;
+    };
+    const uint32 bytes = count * sizeof(GPUDrawIndexedIndirectArgs);
+    if (!IndirectInputs || !IndirectOutput || !IndirectArguments ||
+        (IndirectInputs->GetElementsCount() < (uint32)(count + 1) &&
+         IndirectInputs->Init(GPUBufferDescription::Structured(count + 1, sizeof(IndirectInput)))) ||
+        (IndirectOutput->GetSize() < bytes &&
+         IndirectOutput->Init(GPUBufferDescription::Typed(bytes / sizeof(uint32), PixelFormat::R32_UInt, true))) ||
+        (IndirectArguments->GetSize() < bytes &&
+         IndirectArguments->Init(GPUBufferDescription::Argument(bytes))))
+        return;
+
+    auto* draws = list->DrawCalls.Get();
+    Array<IndirectInput> inputs;
+    inputs.Resize(count + 1);
+    inputs[0] = { (uint32)count, 0 };
+    for (int32 i = 0; i < count; i++)
+        inputs[i + 1] = { objectIndices[i], (uint32)draws[i].Draw.IndicesCount };
+
+    context->UpdateBuffer(IndirectInputs, inputs.Get(), inputs.Count() * sizeof(IndirectInput));
+    context->BindSR(0, visibility->View());
+    context->BindSR(1, IndirectInputs->View());
+    context->BindUA(0, IndirectOutput->View());
+    context->Dispatch(shader, Math::DivideAndRoundUp(count, 64));
+    context->ResetUA();
+    context->ResetSR();
+    context->CopyBuffer(IndirectArguments, IndirectOutput, bytes);
+
+    for (int32 i = 0; i < count; i++)
+    {
+        draws[i].InstanceCount = 0;
+        draws[i].Draw.IndirectArgsBuffer = IndirectArguments;
+        draws[i].Draw.IndirectArgsOffset = i * sizeof(GPUDrawIndexedIndirectArgs);
+    }
 }
 
 StageResult RenderPipelineDrawStage::Render(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources)
@@ -79,9 +148,13 @@ StageResult RenderPipelineDrawStage::Render(GPUContext* context, Array<IVisualDa
     view.PrepareCache(materialContext, (float)color->Width(), (float)color->Height(), Float2::Zero);
     materialContext.List->Init(materialContext);
 
-    for (auto* object : objects)
+    auto* visibility = resources.Get<GPUBuffer>(TEXT("Occlusion.Visibility"));
+    if (visibility && visibility->GetElementsCount() < (uint32)objects.Count())
+        visibility = nullptr;
+    Array<uint32> objectIndices;
+    for (int32 objectIndex = 0; objectIndex < objects.Count(); objectIndex++)
     {
-        auto* warped = dynamic_cast<WarpedVisualData*>(object);
+        auto* warped = dynamic_cast<WarpedVisualData*>(objects[objectIndex]);
         auto* actor = warped ? dynamic_cast<StaticModel*>(warped->GetIVD_Source()) : nullptr;
         auto* model = actor ? actor->Model.Get() : nullptr;
         if (!model || !model->IsLoaded())
@@ -111,14 +184,23 @@ StageResult RenderPipelineDrawStage::Render(GPUContext* context, Array<IVisualDa
             if (!material || !material->IsReady())
                 continue;
 
+            const int32 firstDraw = materialContext.List->DrawCalls.Count();
             mesh.Draw(materialContext, material, warped->WorldMatrix,
                       actor->GetStaticFlags(), false, DrawPass::GBuffer, actor->GetPerInstanceRandom());
+            if (visibility)
+            {
+                const int32 endDraw = materialContext.List->DrawCalls.Count();
+                for (int32 i = firstDraw; i < endDraw; i++)
+                    objectIndices.Add((uint32)objectIndex);
+            }
         }
     }
 
     context->ResetRenderTarget();
     context->ResetSR();
     context->ResetUA();
+    if (visibility)
+        BuildIndirectDraws(context, visibility, materialContext.List, objectIndices);
     constexpr auto listType = DrawCallsListType::GBufferNoDecals;
     if (!materialContext.List->DrawCallsLists[(int32)listType].IsEmpty())
         materialContext.List->SortDrawCalls(materialContext, false, listType, DrawPass::GBuffer);

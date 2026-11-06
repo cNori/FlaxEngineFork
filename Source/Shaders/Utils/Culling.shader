@@ -121,6 +121,8 @@ void CS_HZBCull(uint DispatchThreadId : SV_DispatchThreadID)
 
 #endif
 
+static const float V2ShadowDepthBias = 0.0005;
+
 #ifdef _CS_ShadowCasterSelection
 
 META_CB_BEGIN(1, ShadowCasterSelectionData)
@@ -174,7 +176,7 @@ bool IsAlreadyShadowed(float3 receiver)
     for (uint tap = 0; tap < 4; tap++)
     {
         float blocker = LightDepth.Load(int3(first + int2(tap & 1, tap >> 1), 0));
-        if (!DEPTH_CMP(blocker, ndc.z) || abs(blocker - ndc.z) < 0.0005)
+        if (!DEPTH_CMP(blocker, ndc.z) || abs(blocker - ndc.z) <= V2ShadowDepthBias)
             return false;
     }
     return true;
@@ -433,10 +435,17 @@ float SampleV2Shadow(float3 receiver)
     float2 uv = ndc.xy * float2(0.5, -0.5) + 0.5;
     if (any(uv < 0) || any(uv >= 1) || ndc.z <= 0 || ndc.z >= 1)
         return 1.0;
-    uint width, height;
-    LightingLightDepth.GetDimensions(width, height);
-    float blocker = LightingLightDepth.Load(int3(int2(uv * float2(width, height)), 0));
-    return DEPTH_CMP(blocker, ndc.z) && abs(blocker - ndc.z) > 0.0005 ? 0.0 : 1.0;
+    // Match the bias and four-texel footprint used by caster selection.
+#if REVERSE_Z
+    const float receiverDepth = ndc.z + V2ShadowDepthBias;
+    if (receiverDepth >= 1.0)
+        return 1.0;
+#else
+    const float receiverDepth = ndc.z - V2ShadowDepthBias;
+    if (receiverDepth <= 0.0)
+        return 1.0;
+#endif
+    return LightingLightDepth.SampleCmpLevelZero(ShadowSamplerLinear, uv, receiverDepth);
 }
 
 META_PS(true, FEATURE_LEVEL_SM5)
@@ -481,6 +490,29 @@ float4 PS_V2DirectionalLighting(float4 position : SV_Position) : SV_Target
         result += (response.Diffuse + response.Specular) * nDotL * visibility * LightingRadiance.rgb * max(LightingRadiance.a, 0.0);
     }
     return float4(result, 1);
+}
+
+#endif
+
+#ifdef _CS_V2ShadowIndirectArgs
+
+StructuredBuffer<uint> ShadowSelectionFlags : register(t0);
+StructuredBuffer<uint2> ShadowIndirectInputs : register(t1);
+RWBuffer<uint> ShadowIndirectOutput : register(u0);
+
+META_CS(true, FEATURE_LEVEL_SM5)
+[numthreads(64, 1, 1)]
+void CS_V2ShadowIndirectArgs(uint index : SV_DispatchThreadID)
+{
+    if (index >= ShadowIndirectInputs[0].x)
+        return;
+    uint2 input = ShadowIndirectInputs[index + 1];
+    uint offset = index * 5;
+    ShadowIndirectOutput[offset + 0] = input.y;
+    ShadowIndirectOutput[offset + 1] = ShadowSelectionFlags[input.x] != 0 ? 1 : 0;
+    ShadowIndirectOutput[offset + 2] = 0;
+    ShadowIndirectOutput[offset + 3] = 0;
+    ShadowIndirectOutput[offset + 4] = 0;
 }
 
 #endif
