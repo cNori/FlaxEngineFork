@@ -233,11 +233,16 @@ bool ShaderAssetBase::LoadShaderCache(ShaderCacheResult& result)
         // Remove current profile internal chunk (it could be loaded by the asset itself during precaching phrase)
         parent->ReleaseChunk(cacheChunkIndex);
 
-        // Decrypt source code
+        // Compile a private copy. The asset chunk stays encrypted so overlapping
+        // compilation or reload cannot change the source while a compiler reads it.
         auto sourceChunk = parent->GetChunk(SHADER_FILE_CHUNK_SOURCE);
-        auto source = sourceChunk->Get<char>();
-        auto sourceLength = sourceChunk->Size();
-        Encryption::DecryptBytes((byte*)source, sourceLength);
+        BytesContainer sourceCode;
+        sourceCode.Copy(sourceChunk->Data);
+        auto sourceLength = sourceCode.Length();
+        if (sourceLength < 1)
+            return true;
+        auto source = reinterpret_cast<char*>(sourceCode.Get());
+        Encryption::DecryptBytes(sourceCode.Get(), sourceLength - 1);
         source[sourceLength - 1] = 0;
 
         // Init shader cache output stream
@@ -283,9 +288,6 @@ bool ShaderAssetBase::LoadShaderCache(ShaderCacheResult& result)
 #endif
         InitCompilationOptions(options);
         const bool failed = ShadersCompilation::Compile(options);
-
-        // Encrypt source code
-        Encryption::EncryptBytes(reinterpret_cast<byte*>(source), sourceLength);
 
         if (failed)
         {
