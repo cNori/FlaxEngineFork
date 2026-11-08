@@ -3,6 +3,7 @@
 #pragma once
 
 #include "Light.h"
+#include "Engine/Graphics/RendererV2/ILightData.h"
 #include "Engine/Content/Assets/IESProfile.h"
 #include "Engine/Content/AssetReference.h"
 
@@ -10,7 +11,7 @@
 /// Spot light emits light from the point in a given direction.
 /// </summary>
 API_CLASS(Attributes="ActorContextMenu(\"New/Lights/Spot Light\"), ActorToolbox(\"Lights\")")
-class FLAXENGINE_API SpotLight : public LightWithShadow
+class FLAXENGINE_API SpotLight : public LightWithShadow, public ILightData
 {
     DECLARE_SCENE_OBJECT(SpotLight);
 private:
@@ -117,6 +118,19 @@ private:
 
 public:
     // [LightWithShadow]
+    void Collect(RenderCollectionContext& context) override;
+    RenderLightKind GetILD_Type() const override { return RenderLightKind::Spot; }
+    Vector3 GetILD_Direction() const override { return GetForward(); }
+    ::Color GetILD_Color() const override { return Color; }
+    float GetILD_Intensity() const override { return ComputeBrightness(); }
+    Vector3 GetILD_WorldPosition() const override { return GetPosition(); }
+    float GetILD_Range() const override { return GetScaledRadius(); }
+    float GetILD_InnerConeAngle() const override { return GetInnerConeAngle(); }
+    float GetILD_OuterConeAngle() const override { return GetOuterConeAngle(); }
+    bool GetILD_InverseSquaredFalloff() const override { return UseInverseSquaredFalloff; }
+    float GetILD_FalloffExponent() const override { return FallOffExponent; }
+    bool GetILD_CastShadows() const override { return EnumHasAnyFlags(ShadowsMode, ShadowsCastingMode::DynamicOnly); }
+    float GetILD_ShadowStrength() const override { return ShadowsStrength; }
     void Draw(RenderContextBatch& renderContextBatch) override;
 #if USE_EDITOR
     void OnDebugDraw() override;

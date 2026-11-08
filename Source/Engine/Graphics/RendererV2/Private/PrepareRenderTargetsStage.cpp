@@ -34,9 +34,9 @@ void PrepareRenderTargetsStage::OnBeginFrame(GPUContext* context)
         DepthTarget = device->CreateTexture(TEXT("V2 Scene Depth"));
     if (!ColorTarget || !DepthTarget)
         return;
-    if (ColorTarget->Width() != Width || ColorTarget->Height() != Height || !ColorTarget->GetMemoryUsage())
+    if (ColorTarget->Width() != Width || ColorTarget->Height() != Height || ColorTarget->Format() != PixelFormat::R16G16B16A16_Float || !ColorTarget->GetMemoryUsage())
     {
-        auto desc = GPUTextureDescription::New2D(Width, Height, PixelFormat::R8G8B8A8_UNorm);
+        auto desc = GPUTextureDescription::New2D(Width, Height, PixelFormat::R16G16B16A16_Float);
         if (ColorTarget->Init(desc))
             return;
     }

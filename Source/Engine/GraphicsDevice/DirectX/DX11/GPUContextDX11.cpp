@@ -98,6 +98,7 @@ void GPUContextDX11::FrameBegin()
     // Setup
     _flushOnDispatch = false;
     _depthBounds = false;
+    _reverseDepthComparison = false;
     _omDirtyFlag = false;
     _uaDirtyFlag = false;
     _cbDirtyFlag = false;
@@ -704,6 +705,24 @@ GPUPipelineState* GPUContextDX11::GetState() const
     return _currentState;
 }
 
+void GPUContextDX11::SetReverseDepthComparison(bool reverse)
+{
+    if (_reverseDepthComparison == reverse)
+        return;
+    _reverseDepthComparison = reverse;
+    BindDepthStencilState();
+}
+
+void GPUContextDX11::BindDepthStencilState()
+{
+    auto* state = _currentState ? (_reverseDepthComparison ? _currentState->ReversedDepthStencilState : _currentState->DepthStencilState) : nullptr;
+    if (CurrentDepthStencilState != state)
+    {
+        CurrentDepthStencilState = state;
+        _context->OMSetDepthStencilState(state, CurrentStencilRef);
+    }
+}
+
 void GPUContextDX11::SetState(GPUPipelineState* state)
 {
     if (_currentState != state)
@@ -712,7 +731,6 @@ void GPUContextDX11::SetState(GPUPipelineState* state)
 
         ID3D11BlendState* blendState = nullptr;
         ID3D11RasterizerState* rasterizerState = nullptr;
-        ID3D11DepthStencilState* depthStencilState = nullptr;
         GPUShaderProgramVSDX11* vs = nullptr;
 #if GPU_ALLOW_TESSELLATION_SHADERS
         GPUShaderProgramHSDX11* hs = nullptr;
@@ -728,8 +746,6 @@ void GPUContextDX11::SetState(GPUPipelineState* state)
             ASSERT(_currentState->IsValid());
             blendState = _currentState->BlendState;
             rasterizerState = _device->RasterizerStates[_currentState->RasterizerStateIndex];
-            //depthStencilState = _device->DepthStencilStates2[_currentState->DepthStencilStateIndex];
-            depthStencilState = _currentState->DepthStencilState;
             ASSERT(_currentState->VS != nullptr);
             vs = _currentState->VS;
 #if GPU_ALLOW_TESSELLATION_SHADERS
@@ -745,11 +761,7 @@ void GPUContextDX11::SetState(GPUPipelineState* state)
 
         // Per pipeline stage state caching
         bool shaderEnabled = false;
-        if (CurrentDepthStencilState != depthStencilState)
-        {
-            CurrentDepthStencilState = depthStencilState;
-            _context->OMSetDepthStencilState(depthStencilState, CurrentStencilRef);
-        }
+        BindDepthStencilState();
         if (CurrentRasterizerState != rasterizerState)
         {
             CurrentRasterizerState = rasterizerState;

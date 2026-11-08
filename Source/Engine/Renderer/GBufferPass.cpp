@@ -150,7 +150,7 @@ void DebugOverrideDrawCallsMaterial(const RenderContext& renderContext, IMateria
 
 #endif
 
-void GBufferPass::Fill(RenderContext& renderContext, GPUTexture* lightBuffer)
+void GBufferPass::Fill(RenderContext& renderContext, GPUTexture* lightBuffer, bool reverseDepthComparison)
 {
     PROFILE_GPU_CPU("GBuffer");
 
@@ -178,7 +178,7 @@ void GBufferPass::Fill(RenderContext& renderContext, GPUTexture* lightBuffer)
 
     // Clear GBuffer
     {
-        context->ClearDepth(*renderContext.Buffers->DepthBuffer);
+        context->ClearDepth(*renderContext.Buffers->DepthBuffer, reverseDepthComparison ? GPU_DEPTH_RANGE_MIN : GPU_DEPTH_RANGE_MAX);
         context->Clear(lightBuffer->View(), Color::Transparent);
         context->Clear(renderContext.Buffers->GBuffer0->View(), Color::Transparent);
         context->Clear(renderContext.Buffers->GBuffer1->View(), Color::Transparent);

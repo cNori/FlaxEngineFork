@@ -407,6 +407,7 @@ bool DeployDataStep::Perform(CookingData& data)
     data.AddRootEngineAsset(TEXT("Shaders/Shadows/Shadows"));
     data.AddRootEngineAsset(TEXT("Shaders/Utils/BitonicSort"));
     data.AddRootEngineAsset(TEXT("Shaders/Utils/Culling"));
+    data.AddRootEngineAsset(TEXT("Shaders/Utils/VirtualShadowMaps"));
     //data.AddRootEngineAsset(TEXT("Shaders/Utils/DebugDraw")); // TODO: debug draw in dev-builds
     data.AddRootEngineAsset(TEXT("Shaders/Utils/GlobalSignDistanceField"));
     data.AddRootEngineAsset(TEXT("Shaders/Utils/GPUParticlesSorting"));

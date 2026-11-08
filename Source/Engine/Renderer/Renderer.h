@@ -22,6 +22,11 @@ API_CLASS(Static) class FLAXENGINE_API Renderer
     DECLARE_SCRIPTING_TYPE_NO_SPAWN(Renderer);
 public:
     /// <summary>
+    /// The active pipeline
+    /// </summary>
+    static JsonAssetReference<RenderPipeline> Pipeline;
+
+    /// <summary>
     /// Determines whether the scene rendering system is ready (all shaders are loaded and helper resources are ready).
     /// </summary>
     static bool IsReady();

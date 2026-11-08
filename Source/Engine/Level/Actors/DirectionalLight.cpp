@@ -1,6 +1,8 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "DirectionalLight.h"
+#include "Engine/Graphics/RendererV2/RenderCollectionContext.h"
+#include "Engine/Graphics/RendererV2/RenderCompositor.h"
 #include "Engine/Graphics/RenderTask.h"
 #include "Engine/Graphics/RenderContext.h"
 #include "Engine/Renderer/RenderList.h"
@@ -15,6 +17,12 @@ DirectionalLight::DirectionalLight(const SpawnParams& params)
 
     _drawNoCulling = 1;
     Brightness = 8.0f;
+}
+
+void DirectionalLight::Collect(RenderCollectionContext& context)
+{
+    if (context.Compositor)
+        context.Compositor->SubmitLight(context.Pipeline, this);
 }
 
 void DirectionalLight::Draw(RenderContextBatch& renderContextBatch)

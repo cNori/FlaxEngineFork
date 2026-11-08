@@ -37,9 +37,12 @@ struct WarpedViewpoint : ICamera
     ICamera* Source = nullptr;
     ICamera* GetIC_Source() override { return Source ? Source->GetIC_Source() : this; }
     Transform LocalTransform;
+    Vector3 Origin = Vector3::Zero;
     Matrix Projection     = Matrix::Identity;
     Matrix View           = Matrix::Identity;
     Matrix ViewProjection = Matrix::Identity;
+    Matrix SceneDepthProjection = Matrix::Identity;
+    float SceneDepthClear = 1.0f;
     Matrix GetIC_Projection() override { return Projection; }
     void* GetIC_WorldTransform() override { return &LocalTransform; }
     uint64 GetIC_RenderTypeId() override;
@@ -61,7 +64,7 @@ public:
     StageResult Render(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources) override;
 public:
     /// <summary>
-    /// Overrides the shared render origin in the default pipeline until cleared.
+    /// Overrides the shared render origin. Zero restores automatic camera-relative placement.
     /// </summary>
     API_FUNCTION() void SetOrigin(const Vector3& origin)
     {

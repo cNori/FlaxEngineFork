@@ -1,7 +1,9 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "../WorldWarpStage.h"
+#include "Engine/Graphics/GPUContext.h"
 #include "Engine/Level/Actors/Camera.h"
+#include "Engine/Level/LargeWorlds.h"
 #include "Engine/Platform/StringUtils.h"
 
 WorldWarpStage::WorldWarpStage(const SpawnParams& params)
@@ -50,10 +52,19 @@ StageResult WorldWarpStage::Render(GPUContext* context, Array<IVisualData*>& obj
     if (!pose)
         return StageResult::Failed;
 
+    // Keep float camera and mesh transforms near zero. The shared origin only
+    // moves at chunk boundaries so world-aligned shadow texels remain stable.
+    constexpr Real chunkSize = LargeWorlds::ChunkSize;
+    const Vector3 frameOrigin = Origin == Vector3::Zero
+        ? Vector3::Floor(pose->Translation / chunkSize + Vector3((Real)0.5)) * chunkSize
+        : Origin;
+    WarpedView.Origin = frameOrigin;
     WarpedView.Source = viewpoint;
     WarpedView.LocalTransform = *pose;
-    WarpedView.LocalTransform.Translation -= Origin;
+    WarpedView.LocalTransform.Translation -= frameOrigin;
     WarpedView.Projection = viewpoint->GetIC_Projection();
+    WarpedView.SceneDepthProjection = WarpedView.Projection;
+    WarpedView.SceneDepthClear = GPU_DEPTH_RANGE_MAX;
     //prep view
     const auto forward = Vector3::Transform(Vector3::Forward, WarpedView.LocalTransform.Orientation);
     const auto up = Vector3::Transform(Vector3::Up, WarpedView.LocalTransform.Orientation);
@@ -68,13 +79,13 @@ StageResult WorldWarpStage::Render(GPUContext* context, Array<IVisualData*>& obj
         WarpedVisualData warped;
         warped.Source = objects[i];
         warped.LocalTransform = *(Transform*)warped.Source->GetIVD_WorldTransform();
-        warped.LocalTransform.Translation -= Origin;
+        warped.LocalTransform.Translation -= frameOrigin;
         const auto& transform = warped.LocalTransform;
         Matrix::Transformation(transform.Scale,transform.Orientation,Float3(transform.Translation),warped.WorldMatrix);
         const auto& bounds = *(BoundingBox*)warped.Source->GetIVD_Bounds();
-        warped.Bounds = BoundingBox(bounds.Minimum - Origin, bounds.Maximum - Origin);
+        warped.Bounds = BoundingBox(bounds.Minimum - frameOrigin, bounds.Maximum - frameOrigin);
         const auto& sphere = *(BoundingSphere*)warped.Source->GetIVD_BoundsSphere();
-        warped.Sphere = BoundingSphere(sphere.Center - Origin, sphere.Radius);
+        warped.Sphere = BoundingSphere(sphere.Center - frameOrigin, sphere.Radius);
         WarpedObjects.Add(warped);
         objects[i] = &WarpedObjects.Last();
     }

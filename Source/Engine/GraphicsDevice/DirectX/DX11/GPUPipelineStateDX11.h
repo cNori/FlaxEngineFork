@@ -19,6 +19,7 @@ public:
     D3D11_PRIMITIVE_TOPOLOGY PrimitiveTopology;
     bool DepthBounds;
     ID3D11DepthStencilState* DepthStencilState = nullptr;
+    ID3D11DepthStencilState* ReversedDepthStencilState = nullptr;
     ID3D11BlendState* BlendState = nullptr;
     GPUShaderProgramVSDX11* VS = nullptr;
 #if GPU_ALLOW_TESSELLATION_SHADERS

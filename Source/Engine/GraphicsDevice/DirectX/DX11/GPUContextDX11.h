@@ -33,6 +33,7 @@ private:
     int32 _maxUASlots;
     bool _flushOnDispatch;
     bool _depthBounds;
+    bool _reverseDepthComparison = false;
 
     // Output Merger
     bool _omDirtyFlag;
@@ -108,6 +109,8 @@ public:
 
 private:
 
+    void BindDepthStencilState();
+
     void flushSRVs();
     void flushUAVs();
     void flushCBs();
@@ -118,6 +121,9 @@ private:
     void SetDepthBounds(bool enable, float minDepth, float maxDepth);
 
 public:
+
+    // Uses the opposite depth ordering while drawing to a reversed depth target.
+    void SetReverseDepthComparison(bool reverse);
 
     // [GPUContext]
     void FrameBegin() override;

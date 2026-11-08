@@ -1,6 +1,8 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "SpotLight.h"
+#include "Engine/Graphics/RendererV2/RenderCollectionContext.h"
+#include "Engine/Graphics/RendererV2/RenderCompositor.h"
 #include "Engine/Content/Deprecated.h"
 #include "Engine/Content/Assets/IESProfile.h"
 #include "Engine/Graphics/RenderView.h"
@@ -126,6 +128,12 @@ void SpotLight::OnTransformChanged()
     LightWithShadow::OnTransformChanged();
 
     UpdateBounds();
+}
+
+void SpotLight::Collect(RenderCollectionContext& context)
+{
+    if (context.Compositor)
+        context.Compositor->SubmitLight(context.Pipeline, this);
 }
 
 void SpotLight::Draw(RenderContextBatch& renderContextBatch)

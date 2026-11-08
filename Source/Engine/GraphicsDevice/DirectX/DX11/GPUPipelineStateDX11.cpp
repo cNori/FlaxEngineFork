@@ -7,6 +7,7 @@
 void GPUPipelineStateDX11::OnReleaseGPU()
 {
     DepthStencilState = nullptr;
+    ReversedDepthStencilState = nullptr;
     BlendState = nullptr;
     VS = nullptr;
 #if GPU_ALLOW_TESSELLATION_SHADERS
@@ -63,6 +64,22 @@ bool GPUPipelineStateDX11::Init(const Description& desc)
     // States
     RasterizerStateIndex = static_cast<int32>(desc.CullMode) + (desc.Wireframe ? 0 : 3) + (desc.DepthClipEnable ? 0 : 6);
     DepthStencilState = _device->GetDepthStencilState(&desc);
+    ReversedDepthStencilState = DepthStencilState;
+    if (desc.DepthEnable && (desc.DepthFunc == ComparisonFunc::Less || desc.DepthFunc == ComparisonFunc::LessEqual ||
+                             desc.DepthFunc == ComparisonFunc::Greater || desc.DepthFunc == ComparisonFunc::GreaterEqual))
+    {
+        auto reversed = desc;
+        // Flip the ordering and preserve equality.
+        switch (desc.DepthFunc)
+        {
+        case ComparisonFunc::Less: reversed.DepthFunc = ComparisonFunc::Greater; break;
+        case ComparisonFunc::LessEqual: reversed.DepthFunc = ComparisonFunc::GreaterEqual; break;
+        case ComparisonFunc::Greater: reversed.DepthFunc = ComparisonFunc::Less; break;
+        case ComparisonFunc::GreaterEqual: reversed.DepthFunc = ComparisonFunc::LessEqual; break;
+        default: break;
+        }
+        ReversedDepthStencilState = _device->GetDepthStencilState(&reversed);
+    }
     BlendState = _device->GetBlendState(desc.BlendMode);
 
     // Calculate approx. memory usage (just to set sth)

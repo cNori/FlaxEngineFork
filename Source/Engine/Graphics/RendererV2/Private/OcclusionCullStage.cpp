@@ -77,7 +77,12 @@ StageResult OcclusionCullStage::Render(GPUContext* context, Array<IVisualData*>&
 
     if (!DepthBuffers)
         DepthBuffers = New<RenderBuffers>();
-    if (DepthBuffers->Init((int32)rect.Width, (int32)rect.Height))
+    constexpr auto floatDepth = PixelFormat::D32_Float_S8X24_UInt;
+    const bool useFloatDepth = EnumHasAllFlags(device->GetFormatFeatures(floatDepth).Support,
+        FormatSupport::DepthStencil | FormatSupport::Texture2D);
+    const int32 width = (int32)rect.Width;
+    const int32 height = (int32)rect.Height;
+    if (useFloatDepth ? DepthBuffers->InitWithDepthFormat(width, height, floatDepth) : DepthBuffers->Init(width, height))
     {
         Delete(DepthBuffers);
         DepthBuffers = nullptr;
@@ -93,9 +98,7 @@ StageResult OcclusionCullStage::Render(GPUContext* context, Array<IVisualData*>&
     depthView.SetUp(view->View, view->Projection);
     depthView.Position = Float3(view->LocalTransform.Translation);
     depthView.Direction = Float3(Vector3::Transform(Vector3::Forward, view->LocalTransform.Orientation));
-    if (auto* source = viewpoint->GetIC_Source())
-        if (const auto* pose = static_cast<const Transform*>(source->GetIC_WorldTransform()))
-            depthView.Origin = pose->Translation - view->LocalTransform.Translation;
+    depthView.Origin = view->Origin;
     depthView.PrevViewProjection = depthView.ViewProjection();
     depthView.PrepareCache(depthContext, rect.Width, rect.Height, Float2::Zero);
     depthContext.List->Init(depthContext);

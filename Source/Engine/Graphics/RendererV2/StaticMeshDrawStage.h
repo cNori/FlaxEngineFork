@@ -16,14 +16,7 @@ API_CLASS() class FLAXENGINE_API RenderPipelineDrawStage : public RenderPipeline
 {
     DECLARE_SCRIPTING_TYPE(RenderPipelineDrawStage);
 private:
-    RenderBuffers* MaterialBuffers = nullptr;
-    GPUTexture* EmissiveBuffer = nullptr;
-    AssetReference<Shader> CullingShader;
-    GPUBuffer* IndirectInputs = nullptr;
-    GPUBuffer* IndirectOutput = nullptr;
-    GPUBuffer* IndirectArguments = nullptr;
 
-    void BuildIndirectDraws(GPUContext* context, GPUBuffer* visibility, RenderList* list, const Array<uint32>& objectIndices);
 public:
     ~RenderPipelineDrawStage();
     StageResult Render(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources) override;

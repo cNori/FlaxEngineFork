@@ -18,6 +18,7 @@ class RenderPipelineStage;
 /// <summary>
 /// A runtime pipeline instance with independent state per view.
 /// </summary>
+API_CLASS(Attributes = "ContentContextMenu(\"New/Rendering/Render Pipeline\")")
 API_CLASS() class FLAXENGINE_API RenderPipeline : public ScriptingObject
 {
     DECLARE_SCRIPTING_TYPE(RenderPipeline);
@@ -37,7 +38,7 @@ public:
 protected:
     friend class RenderCompositor;
     /// <summary>Registers a stage owned and destroyed by this runtime pipeline.</summary>
-    bool AddOwnedStage(RenderPipelineStage* stage);
+    bool AddOwnedStage(RenderPipelineStage* stage, const Char* name = nullptr);
 private:
     Array<RenderPipelineStage*> Stages;
     Array<ICamera*> Viewpoints;

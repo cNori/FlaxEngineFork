@@ -288,6 +288,9 @@ public:
     /// <returns>True if cannot allocate buffers, otherwise false.</returns>
     API_FUNCTION() bool Init(int32 width, int32 height);
 
+    // Initializes the buffers with a supported caller-selected depth format.
+    bool InitWithDepthFormat(int32 width, int32 height, PixelFormat depthFormat);
+
     /// <summary>
     /// Release the buffers data.
     /// </summary>

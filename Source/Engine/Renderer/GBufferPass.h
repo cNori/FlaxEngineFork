@@ -32,7 +32,8 @@ public:
     /// </summary>
     /// <param name="renderContext">The rendering context.</param>
     /// <param name="lightBuffer">Light buffer to output material emissive light and precomputed indirect lighting</param>
-    void Fill(RenderContext& renderContext, GPUTexture* lightBuffer);
+    /// <param name="reverseDepthComparison">Whether the camera uses the opposite depth order from the engine default.</param>
+    void Fill(RenderContext& renderContext, GPUTexture* lightBuffer, bool reverseDepthComparison = false);
 
     /// <summary>
     /// Render debug view

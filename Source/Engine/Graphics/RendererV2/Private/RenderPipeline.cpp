@@ -106,11 +106,13 @@ GPUResource* RenderPipeline::GetOutput(const String& name) const
     return Resources.GetOutput(name);
 }
 
-bool RenderPipeline::AddOwnedStage(RenderPipelineStage* stage)
+bool RenderPipeline::AddOwnedStage(RenderPipelineStage* stage, const Char* name)
 {
     if (!stage)
         return false;
-    if (stage->NameTag.IsEmpty())
+    if (name)
+        stage->NameTag = name;
+    else if (stage->NameTag.IsEmpty())
         stage->NameTag = String(stage->GetType().Fullname);
     if (!AddStage(stage))
         return false;
