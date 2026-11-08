@@ -29,6 +29,12 @@ private:
     float ProjectionDistance = 0.0f;
     int32 LastCasterCount = 0;
     int32 LastRejectedProxyCount = 0;
+    int32 LastProxyCasterCount = 0;
+    int32 LastSelectionDispatchCount = 0;
+    int32 LastSelectionTierCount = 0;
+    int32 LastCascadeCount = 0;
+    int32 LastReceiverWidth = 0;
+    int32 LastReceiverHeight = 0;
     bool LastUsedSelection = false;
     AssetReference<Shader> SelectionShader;
     GPUBuffer* BoundsBuffer = nullptr;
@@ -56,6 +62,14 @@ private:
     GPUPipelineState* ShadowFilterState = nullptr;
     GPUTexture* ShadowMask = nullptr;
     GPUTexture* FilteredShadowMask = nullptr;
+    GPUPipelineState* BlendReduceState = nullptr;
+    GPUPipelineState* BlendFilterState = nullptr;
+    GPUPipelineState* BlendCombineState = nullptr;
+    Array<GPUTexture*> BlendPyramid;
+    GPUTexture* BlendBlurTemp[2] = {};
+    GPUTexture* BlendFiltered[2] = {};
+    GPUTexture* BlendResult = nullptr;
+    bool BuildShadowMaskBlend(GPUContext* context, GPUTexture* visibility, const RenderPipelineGraphicSettings* settings);
     void OnShaderReloading(Asset* asset);
     int32 PrepareShadowAtlas(GPUDevice* device, int32 resolution, int32 farTileWidth);
     void PrepareShadowCascadeMaps(GPUDevice* device, const RenderPipelineGraphicSettings* settings);
@@ -110,6 +124,24 @@ public:
 
     /// <summary>Gets the number of expensive casters skipped by the CPU readback path.</summary>
     API_PROPERTY() int32 GetRejectedProxyCount() const { return LastRejectedProxyCount; }
+
+    /// <summary>Expensive caster candidates requiring a receiver scan in the last view, before GPU selection.</summary>
+    API_PROPERTY() int32 GetProxyCasterCount() const { return LastProxyCasterCount; }
+
+    /// <summary>Receiver-selection compute dispatches issued for the last view.</summary>
+    API_PROPERTY() int32 GetSelectionDispatchCount() const { return LastSelectionDispatchCount; }
+
+    /// <summary>Configured cascade slices processed in the last view. Zero uses the legacy atlas path.</summary>
+    API_PROPERTY() int32 GetRenderedCascadeCount() const { return LastCascadeCount; }
+
+    /// <summary>Width of the camera-depth input used for receiver selection.</summary>
+    API_PROPERTY() int32 GetReceiverWidth() const { return LastReceiverWidth; }
+
+    /// <summary>Height of the camera-depth input used for receiver selection.</summary>
+    API_PROPERTY() int32 GetReceiverHeight() const { return LastReceiverHeight; }
+
+    /// <summary>Conservative full-screen pixel-test budget including both legacy atlas tiers when present. Not a measured GPU hit or sample count.</summary>
+    API_PROPERTY() uint64 GetSelectionPixelBudget() const { return (uint64)LastProxyCasterCount * LastReceiverWidth * LastReceiverHeight * LastSelectionTierCount; }
 
     /// <summary>Whether the last shadow draw consumed the GPU selection results.</summary>
     API_PROPERTY() bool GetUsedSelection() const { return LastUsedSelection; }

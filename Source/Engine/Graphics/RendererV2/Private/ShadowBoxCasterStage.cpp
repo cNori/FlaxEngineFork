@@ -65,6 +65,7 @@ namespace
     bool FitShadowSphere(const Float3& cameraPosition, const Matrix& lightView, const BoundingBox& lightBounds,
                          float endDistance, float filterRadius, int32 resolution, BoundingBox& bounds)
     {
+        PROFILE_CPU_NAMED("V2 Shadow Fit Cascade Bounds");
         Float3 lightCenter;
         Float3::TransformCoordinate(cameraPosition, lightView, lightCenter);
         const float diameter = 2.0f * endDistance;
@@ -155,6 +156,18 @@ namespace
         Float4 ShadowSplit; // Near blend start, blend end, near tier enabled, depth precision bias.
         Float4 CascadeRange;
         Float4 CascadeParameters; // Normal bias in world units, cascade index, debug enabled, screen filter radius.
+        Float4 MaskBlendParameters;
+        uint32 MaskBlendInputVisibility;
+        uint32 MaskBlendDebugMode;
+        Float2 MaskBlendPadding;
+    });
+
+    GPU_CB_STRUCT(MaskBlendConstants
+    {
+        Float4 Parameters;
+        uint32 InputVisibility;
+        uint32 DebugMode;
+        Float2 Padding;
     });
 
     GPU_CB_STRUCT(SelectionConstants
@@ -199,6 +212,17 @@ ShadowBoxCasterStage::~ShadowBoxCasterStage()
     SAFE_DELETE_GPU_RESOURCE(ShadowFilterState);
     SAFE_DELETE_GPU_RESOURCE(ShadowMask);
     SAFE_DELETE_GPU_RESOURCE(FilteredShadowMask);
+    SAFE_DELETE_GPU_RESOURCE(BlendReduceState);
+    SAFE_DELETE_GPU_RESOURCE(BlendFilterState);
+    SAFE_DELETE_GPU_RESOURCE(BlendCombineState);
+    SAFE_DELETE_GPU_RESOURCE(BlendResult);
+    for (auto*& texture : BlendPyramid)
+        SAFE_DELETE_GPU_RESOURCE(texture);
+    for (int32 i = 0; i < 2; i++)
+    {
+        SAFE_DELETE_GPU_RESOURCE(BlendBlurTemp[i]);
+        SAFE_DELETE_GPU_RESOURCE(BlendFiltered[i]);
+    }
     SAFE_DELETE_GPU_RESOURCE(SelectionReadback);
     SAFE_DELETE_GPU_RESOURCE(IndirectInputs);
     SAFE_DELETE_GPU_RESOURCE(IndirectOutput);
@@ -228,6 +252,138 @@ void ShadowBoxCasterStage::OnShaderReloading(Asset* asset)
         CascadeDebugState->ReleaseGPU();
     if (ShadowFilterState)
         ShadowFilterState->ReleaseGPU();
+    if (BlendReduceState)
+        BlendReduceState->ReleaseGPU();
+    if (BlendFilterState)
+        BlendFilterState->ReleaseGPU();
+    if (BlendCombineState)
+        BlendCombineState->ReleaseGPU();
+}
+
+bool ShadowBoxCasterStage::BuildShadowMaskBlend(GPUContext* context, GPUTexture* visibility, const RenderPipelineGraphicSettings* settings)
+{
+    auto* device = context->GetDevice();
+    auto* constants = SelectionShader->GPU->GetCB(3);
+    if (!visibility || !settings || !constants || constants->GetSize() != sizeof(ResolveConstants))
+        return false;
+    const auto prepareState = [&](GPUPipelineState*& state, const char* entry)
+    {
+        auto* shader = SelectionShader->GPU->GetPS(entry);
+        if (!shader)
+            return false;
+        if (!state)
+            state = device->CreatePipelineState();
+        if (!state)
+            return false;
+        if (!state->IsValid())
+        {
+            auto desc = GPUPipelineState::Description::DefaultFullscreenTriangle;
+            desc.PS = shader;
+            if (state->Init(desc))
+                return false;
+        }
+        return true;
+    };
+    const auto prepareTexture = [&](GPUTexture*& texture, int32 width, int32 height, const Char* name)
+    {
+        if (!texture)
+            texture = device->CreateTexture(name);
+        return texture && ((texture->Width() == width && texture->Height() == height && texture->GetMemoryUsage()) ||
+            !texture->Init(GPUTextureDescription::New2D(width, height, PixelFormat::R8_UNorm,
+                GPUTextureFlags::ShaderResource | GPUTextureFlags::RenderTarget)));
+    };
+    if (!prepareState(BlendReduceState, "PS_V2ShadowBlendReduce") ||
+        !prepareState(BlendFilterState, "PS_V2ShadowBlendFilter") ||
+        !prepareState(BlendCombineState, "PS_V2ShadowBlendCombine"))
+        return false;
+    const auto draw = [&](GPUPipelineState* state, GPUTexture* input, GPUTexture* output, const MaskBlendConstants& data,
+                          GPUTexture* low = nullptr, GPUTexture* medium = nullptr)
+    {
+        context->ResetRenderTarget();
+        context->ResetSR();
+        ResolveConstants upload = {};
+        upload.MaskBlendParameters = data.Parameters;
+        upload.MaskBlendInputVisibility = data.InputVisibility;
+        upload.MaskBlendDebugMode = data.DebugMode;
+        context->UpdateCB(constants, &upload);
+        context->BindCB(3, constants);
+        context->BindSR(14, input);
+        if (low) context->BindSR(15, low);
+        if (medium) context->BindSR(16, medium);
+        context->SetViewportAndScissors((float)output->Width(), (float)output->Height());
+        context->SetRenderTarget(output->View());
+        context->SetState(state);
+        context->DrawFullscreenTriangle();
+        context->ResetRenderTarget();
+        context->ResetSR();
+    };
+
+    PROFILE_GPU_CPU_NAMED("V2 Multi-resolution Shadow Blend");
+    int32 pyramidIndex = 0;
+    const auto reduceTo = [&](GPUTexture* input, int32 targetEdge, bool invertVisibility, GPUTexture*& result)
+    {
+        result = input;
+        int32 edge = Math::Max(input->Width(), input->Height());
+        while (edge > targetEdge || invertVisibility)
+        {
+            const int32 nextEdge = Math::Max(targetEdge, (edge + 1) / 2);
+            const int32 width = Math::Max(1, (int32)Math::Round((float)result->Width() * nextEdge / edge));
+            const int32 height = Math::Max(1, (int32)Math::Round((float)result->Height() * nextEdge / edge));
+            if (pyramidIndex >= BlendPyramid.Count())
+                BlendPyramid.Add(nullptr);
+            auto*& target = BlendPyramid[pyramidIndex++];
+            if (!prepareTexture(target, width, height, TEXT("V2 Shadow Mask Reduction")))
+                return false;
+            MaskBlendConstants data = {};
+            data.Parameters = Float4(1.0f / width, 1.0f / height, 0, 0);
+            data.InputVisibility = invertVisibility;
+            {
+                PROFILE_GPU_CPU_NAMED("V2 Shadow Mask Reduce");
+                draw(BlendReduceState, result, target, data);
+            }
+            invertVisibility = false;
+            result = target;
+            edge = nextEdge;
+        }
+        return true;
+    };
+    const int32 sourceEdge = Math::Max(visibility->Width(), visibility->Height());
+    const int32 mediumEdge = Math::Min(sourceEdge, Math::Clamp(settings->ShadowBlendMediumResolution, 8, 2048));
+    const int32 lowEdge = Math::Min(mediumEdge, Math::Clamp(settings->ShadowBlendLowResolution, 8, 2048));
+    GPUTexture* medium;
+    GPUTexture* low;
+    if (!reduceTo(visibility, mediumEdge, true, medium) || !reduceTo(medium, lowEdge, false, low))
+        return false;
+    GPUTexture* inputs[2] = { low, medium };
+    const float radii[2] = { settings->ShadowBlendLowFilterRadius, settings->ShadowBlendMediumFilterRadius };
+    for (int32 i = 0; i < 2; i++)
+    {
+        auto* input = inputs[i];
+        if (!prepareTexture(BlendBlurTemp[i], input->Width(), input->Height(), TEXT("V2 Shadow Mask Blur Temp")) ||
+            !prepareTexture(BlendFiltered[i], input->Width(), input->Height(), TEXT("V2 Filtered Shadow Mask Scale")))
+            return false;
+        MaskBlendConstants data = {};
+        data.Parameters = Float4(1.0f / input->Width(), 0, Math::Clamp(radii[i], 0.0f, 8.0f), 0);
+        {
+            PROFILE_GPU_CPU_NAMED("V2 Shadow Mask Blur Horizontal");
+            draw(BlendFilterState, input, BlendBlurTemp[i], data);
+        }
+        data.Parameters = Float4(0, 1.0f / input->Height(), data.Parameters.Z, 0);
+        {
+            PROFILE_GPU_CPU_NAMED("V2 Shadow Mask Blur Vertical");
+            draw(BlendFilterState, BlendBlurTemp[i], BlendFiltered[i], data);
+        }
+    }
+    if (!prepareTexture(BlendResult, visibility->Width(), visibility->Height(), TEXT("V2 Combined Shadow Mask")))
+        return false;
+    MaskBlendConstants data = {};
+    data.Parameters = Float4(1.0f / visibility->Width(), 1.0f / visibility->Height(), 0, 0);
+    data.DebugMode = (uint32)settings->ShadowMaskBlendDebug;
+    {
+        PROFILE_GPU_CPU_NAMED("V2 Shadow Mask Combine");
+        draw(BlendCombineState, visibility, BlendResult, data, BlendFiltered[0], BlendFiltered[1]);
+    }
+    return true;
 }
 
 void ShadowBoxCasterStage::SetProjection(const Vector3& lightDirection, float distance)
@@ -293,6 +449,12 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     Casters.Clear();
     LastCasterCount = 0;
     LastRejectedProxyCount = 0;
+    LastProxyCasterCount = 0;
+    LastSelectionDispatchCount = 0;
+    LastSelectionTierCount = 0;
+    LastCascadeCount = 0;
+    LastReceiverWidth = 0;
+    LastReceiverHeight = 0;
     LastUsedSelection = false;
     if (!(ProjectionDistance > 0.0f) || LightDirection.IsZero() || !context->GetDevice()->Limits.HasCompute)
         return StageResult::Skipped;
@@ -301,6 +463,8 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     const auto* view = dynamic_cast<const WarpedViewpoint*>(viewpoint);
     if (!depth || !view)
         return StageResult::Skipped;
+    LastReceiverWidth = depth->Width();
+    LastReceiverHeight = depth->Height();
 
     if (!SelectionShader)
     {
@@ -488,6 +652,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         if (!keep)
             continue;
         bounds[keptCount] = bounds[i];
+        LastProxyCasterCount += bounds[i].UseProxy != 0;
         Casters[keptCount++] = Casters[i];
     }
     bounds.Resize(keptCount);
@@ -556,40 +721,43 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         Array<IndirectShadowInput> drawInputs;
         if (indirect)
             drawInputs.Add({ 0, 0 }); // Header stores the live draw count.
-        for (int32 i = 0; i < count; i++)
         {
-            if ((bounds[i].UseProxy != 0) != proxies || (selected && (selected[i] & tierBit) == 0))
-                continue;
-            if (tier == 1 || useConfiguredCascades)
+            PROFILE_CPU_NAMED("V2 Shadow Build Draw List");
+            for (int32 i = 0; i < count; i++)
             {
-                const auto& box = lightCasterBounds[i];
-                if (box.Maximum.X < nearBounds.Minimum.X || box.Minimum.X > nearBounds.Maximum.X ||
-                    box.Maximum.Y < nearBounds.Minimum.Y || box.Minimum.Y > nearBounds.Maximum.Y)
+                if ((bounds[i].UseProxy != 0) != proxies || (selected && (selected[i] & tierBit) == 0))
                     continue;
+                if (tier == 1 || useConfiguredCascades)
+                {
+                    const auto& box = lightCasterBounds[i];
+                    if (box.Maximum.X < nearBounds.Minimum.X || box.Minimum.X > nearBounds.Maximum.X ||
+                        box.Maximum.Y < nearBounds.Minimum.Y || box.Minimum.Y > nearBounds.Maximum.Y)
+                        continue;
+                }
+                auto* warped = static_cast<WarpedVisualData*>(Casters[i]);
+                auto* actor = static_cast<StaticModel*>(warped->GetIVD_Source());
+                auto* model = actor->Model.Get();
+                const auto& entries = actor->GetEntries();
+                for (const auto& mesh : model->LODs[model->HighestResidentLODIndex()].Meshes)
+                {
+                    const int32 slot = mesh.GetMaterialSlotIndex();
+                    if (slot < 0 || slot >= model->MaterialSlots.Count())
+                        continue;
+                    if (slot < entries.Count() && (!entries[slot].Visible || entries[slot].ShadowsMode == ShadowsCastingMode::None))
+                        continue;
+                    auto* material = actor->GetMaterial(slot);
+                    if (!material || !material->IsReady() ||
+                        !EnumHasAllFlags(material->GetDrawModes(), DrawPass::Depth | DrawPass::GBuffer))
+                        continue;
+                    const int32 drawIndex = lightContext.List->DrawCalls.Count();
+                    mesh.Draw(lightContext, material, warped->WorldMatrix, actor->GetStaticFlags(),
+                              false, DrawPass::Depth, actor->GetPerInstanceRandom());
+                    if (indirect && lightContext.List->DrawCalls.Count() > drawIndex)
+                        drawInputs.Add({ (uint32)i, (uint32)lightContext.List->DrawCalls.Get()[drawIndex].Draw.IndicesCount });
+                }
             }
-            auto* warped = static_cast<WarpedVisualData*>(Casters[i]);
-            auto* actor = static_cast<StaticModel*>(warped->GetIVD_Source());
-            auto* model = actor->Model.Get();
-            const auto& entries = actor->GetEntries();
-            for (const auto& mesh : model->LODs[model->HighestResidentLODIndex()].Meshes)
-            {
-                const int32 slot = mesh.GetMaterialSlotIndex();
-                if (slot < 0 || slot >= model->MaterialSlots.Count())
-                    continue;
-                if (slot < entries.Count() && (!entries[slot].Visible || entries[slot].ShadowsMode == ShadowsCastingMode::None))
-                    continue;
-                auto* material = actor->GetMaterial(slot);
-                if (!material || !material->IsReady() ||
-                    !EnumHasAllFlags(material->GetDrawModes(), DrawPass::Depth | DrawPass::GBuffer))
-                    continue;
-                const int32 drawIndex = lightContext.List->DrawCalls.Count();
-                mesh.Draw(lightContext, material, warped->WorldMatrix, actor->GetStaticFlags(),
-                          false, DrawPass::Depth, actor->GetPerInstanceRandom());
-                if (indirect && lightContext.List->DrawCalls.Count() > drawIndex)
-                    drawInputs.Add({ (uint32)i, (uint32)lightContext.List->DrawCalls.Get()[drawIndex].Draw.IndicesCount });
-            }
-        }
 
+        }
         if (drawInputs.Count() > 1)
         {
             PROFILE_GPU_CPU_NAMED("V2 Shadow Indirect Arguments");
@@ -641,8 +809,14 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         context->SetRenderTarget(lightDepth->View(), static_cast<GPUTextureView*>(nullptr));
         if (!lightContext.List->DrawCallsLists[(int32)depthList].IsEmpty())
         {
-            lightContext.List->SortDrawCalls(lightContext, false, depthList, DrawPass::Depth);
-            lightContext.List->ExecuteDrawCalls(lightContext, depthList);
+            {
+                PROFILE_CPU_NAMED("V2 Shadow Sort Draw List");
+                lightContext.List->SortDrawCalls(lightContext, false, depthList, DrawPass::Depth);
+            }
+            {
+                PROFILE_GPU_CPU_NAMED("V2 Shadow Execute Depth Draws");
+                lightContext.List->ExecuteDrawCalls(lightContext, depthList);
+            }
         }
         context->ResetRenderTarget();
         RenderList::ReturnToPool(lightContext.List);
@@ -763,20 +937,29 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     context->ResetRenderTarget();
     context->ResetSR();
     context->ResetUA();
-    context->UpdateBuffer(BoundsBuffer, bounds.Get(), count * sizeof(CasterBounds));
+    {
+        PROFILE_GPU_CPU_NAMED("V2 Shadow Upload Caster Bounds");
+        context->UpdateBuffer(BoundsBuffer, bounds.Get(), count * sizeof(CasterBounds));
+    }
     const auto selectCasters = [&]()
     {
-        context->UpdateCB(constants, &data);
-        context->BindCB(1, constants);
-        context->BindSR(2, depth);
-        context->BindSR(3, BoundsBuffer->View());
-        context->BindSR(7, lightDepth ? lightDepth : depth);
-        context->BindSR(8, receiverNormals ? receiverNormals : depth);
-        context->BindUA(1, SelectionBuffer->View());
-        if (debugColor)
-            context->BindUA(2, DebugMask->View());
+        {
+            PROFILE_CPU_NAMED("V2 Shadow Selection Bindings");
+            context->UpdateCB(constants, &data);
+            context->BindCB(1, constants);
+            context->BindSR(2, depth);
+            context->BindSR(3, BoundsBuffer->View());
+            context->BindSR(7, lightDepth ? lightDepth : depth);
+            context->BindSR(8, receiverNormals ? receiverNormals : depth);
+            context->BindUA(1, SelectionBuffer->View());
+            if (debugColor)
+                context->BindUA(2, DebugMask->View());
+        }
         {
             PROFILE_GPU_CPU_NAMED("V2 Shadow Receiver Selection");
+            LastSelectionDispatchCount++;
+            LastSelectionTierCount += data.ShadowSplit.Z != 0.0f ? 2 : 1;
+            ZoneValue(data.CasterCount);
             context->Dispatch(shader, data.GroupsPerRow, Math::DivideAndRoundUp(data.CasterCount, data.GroupsPerRow));
         }
         context->ResetUA();
@@ -870,7 +1053,9 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                 GPUTextureFlags::ShaderResource | GPUTextureFlags::RenderTarget));
     };
 
-    const bool showCascadeDebug = useConfiguredCascades && settings->ShowShadowCascades && !ShowReceiverHits;
+    const bool showBlendDebug = settings && settings->ShadowMaskBlendDebug != ShadowMaskBlendDebugView::None;
+    const bool useMaskBlend = settings && (settings->UseMultiResolutionShadowBlend || showBlendDebug);
+    const bool showCascadeDebug = useConfiguredCascades && settings->ShowShadowCascades && !ShowReceiverHits && !showBlendDebug;
     bool cascadeDebugReady = false;
     bool needsScreenFilter = false;
     GPUTexture* visibilityTexture = nullptr;
@@ -971,6 +1156,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
             data.CameraPosition = Float4(resolve.CameraPosition, 0.0f);
             data.CameraForward = Float4(resolve.CameraForward, 0.0f);
             data.HasLightDepth = 1;
+            LastCascadeCount = slices.Count();
             for (int32 i = slices.Count() - 1; i >= 0; i--)
             {
                 PROFILE_GPU_CPU_NAMED("V2 Shadow Cascade");
@@ -1003,35 +1189,47 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                 data.CameraPosition.W = slice.Parameters.Y * worldTexel;
                 data.ReceiverRange = Float4(slice.Range.X, slice.Range.Z, 0.0f, 0.0f);
                 data.FilterRadius = slice.Filter.AdaptiveRadius;
-                context->ClearDepth(lightDepth->View());
-                drawShadowDepth(0, false, nullptr, false);
+                {
+                    PROFILE_GPU_CPU_NAMED("V2 Shadow Clear Cascade Depth");
+                    context->ClearDepth(lightDepth->View());
+                }
+                {
+                    PROFILE_GPU_CPU_NAMED("V2 Shadow Occluder Prepass");
+                    drawShadowDepth(0, false, nullptr, false);
+                }
                 selectCasters();
                 if (!drawMask)
                     continue;
 
-                drawSelectedDepth(1);
-                ResolveConstants cascadeResolve = resolve;
-                cascadeResolve.LightViewProjection = data.LightViewProjection;
-                cascadeResolve.ShadowTiles[0] = data.ShadowTiles[0];
-                cascadeResolve.ShadowSplit = data.ShadowSplit;
-                cascadeResolve.ShadowFilter.X = maximum.Z - minimum.Z;
-                cascadeResolve.ShadowFilter.Z = slice.Filter.AngularTangent;
-                cascadeResolve.ShadowFilter.W = slice.Filter.AdaptiveRadius;
-                needsScreenFilter |= slice.Filter.ScreenRadius > 0.5f;
-                cascadeResolve.CascadeRange = slice.Range;
-                cascadeResolve.CascadeParameters = Float4(data.CameraPosition.W, slice.Parameters.Z,
-                    showCascadeDebug ? 1.0f : 0.0f, slice.Filter.ScreenRadius);
-                context->UpdateCB(resolveConstants, &cascadeResolve);
-                context->BindCB(3, resolveConstants);
-                context->BindSR(2, depth);
-                context->BindSR(7, lightDepth);
-                context->BindSR(8, receiverNormals);
-                context->SetViewportAndScissors((float)depth->Width(), (float)depth->Height());
-                context->SetRenderTarget(showCascadeDebug ? CascadeDebug->View() : ShadowMask->View());
-                context->SetState(showCascadeDebug ? CascadeDebugState : CascadeMaskState);
-                context->DrawFullscreenTriangle();
-                context->ResetRenderTarget();
-                context->ResetSR();
+                {
+                    PROFILE_GPU_CPU_NAMED("V2 Shadow Selected Casters");
+                    drawSelectedDepth(1);
+                }
+                {
+                    PROFILE_GPU_CPU_NAMED("V2 Shadow Resolve Cascade Mask");
+                    ResolveConstants cascadeResolve = resolve;
+                    cascadeResolve.LightViewProjection = data.LightViewProjection;
+                    cascadeResolve.ShadowTiles[0] = data.ShadowTiles[0];
+                    cascadeResolve.ShadowSplit = data.ShadowSplit;
+                    cascadeResolve.ShadowFilter.X = maximum.Z - minimum.Z;
+                    cascadeResolve.ShadowFilter.Z = slice.Filter.AngularTangent;
+                    cascadeResolve.ShadowFilter.W = slice.Filter.AdaptiveRadius;
+                    needsScreenFilter |= slice.Filter.ScreenRadius > 0.5f;
+                    cascadeResolve.CascadeRange = slice.Range;
+                    cascadeResolve.CascadeParameters = Float4(data.CameraPosition.W, slice.Parameters.Z,
+                        showCascadeDebug ? 1.0f : 0.0f, slice.Filter.ScreenRadius);
+                    context->UpdateCB(resolveConstants, &cascadeResolve);
+                    context->BindCB(3, resolveConstants);
+                    context->BindSR(2, depth);
+                    context->BindSR(7, lightDepth);
+                    context->BindSR(8, receiverNormals);
+                    context->SetViewportAndScissors((float)depth->Width(), (float)depth->Height());
+                    context->SetRenderTarget(showCascadeDebug ? CascadeDebug->View() : ShadowMask->View());
+                    context->SetState(showCascadeDebug ? CascadeDebugState : CascadeMaskState);
+                    context->DrawFullscreenTriangle();
+                    context->ResetRenderTarget();
+                    context->ResetSR();
+                }
             }
         }
     }
@@ -1101,27 +1299,76 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                     visibilityTexture = FilteredShadowMask;
                 }
 
-                context->ResetSR();
-                context->SetViewportAndScissors((float)sceneColor->Width(), (float)sceneColor->Height());
-                context->SetRenderTarget(sceneColor->View());
-                resolve.UseFilteredShadow = visibilityTexture != nullptr;
-                context->UpdateCB(resolveConstants, &resolve);
-                context->BindCB(3, resolveConstants);
-                context->BindSR(2, depth);
-                context->BindSR(7, lightDepth);
-                context->BindSR(8, receiverNormals);
-                context->BindSR(9, baseColor);
-                context->BindSR(10, material);
-                context->BindSR(11, emissive);
-                if (visibilityTexture)
+                GPUTexture* blendDebugTexture = nullptr;
+                if (useMaskBlend)
                 {
-                    context->BindSR(13, visibilityTexture);
-                    resources.SetOutput(TEXT("Shadow.Visibility"), visibilityTexture);
+                    // Cascades already publish a common receiver-space mask. Legacy
+                    // adaptive views normally shade directly, so materialize A first.
+                    if (!visibilityTexture && !useConfiguredCascades &&
+                        preparePass(ShadowMaskState, ShadowMask, "PS_V2ShadowMask", TEXT("V2 Shadow Mask"), PixelFormat::R16G16_Float))
+                    {
+                        PROFILE_GPU_CPU_NAMED("V2 Detailed Shadow Mask");
+                        context->ResetRenderTarget();
+                        context->ResetSR();
+                        context->UpdateCB(resolveConstants, &resolve);
+                        context->BindCB(3, resolveConstants);
+                        context->BindSR(2, depth);
+                        context->BindSR(7, lightDepth);
+                        context->BindSR(8, receiverNormals);
+                        context->SetViewportAndScissors((float)depth->Width(), (float)depth->Height());
+                        context->SetRenderTarget(ShadowMask->View());
+                        context->SetState(ShadowMaskState);
+                        context->DrawFullscreenTriangle();
+                        context->ResetRenderTarget();
+                        context->ResetSR();
+                        visibilityTexture = ShadowMask;
+                    }
+                    if (visibilityTexture && BuildShadowMaskBlend(context, visibilityTexture, settings))
+                    {
+                        resources.SetOutput(TEXT("Shadow.MaskBlend.A"), visibilityTexture);
+                        resources.SetOutput(TEXT("Shadow.MaskBlend.B"), BlendFiltered[0]);
+                        resources.SetOutput(TEXT("Shadow.MaskBlend.C"), BlendFiltered[1]);
+                        resources.SetOutput(TEXT("Shadow.MaskBlend.Result"), BlendResult);
+                        if (showBlendDebug)
+                            blendDebugTexture = BlendResult;
+                        else
+                            visibilityTexture = BlendResult;
+                    }
                 }
-                context->SetState(ResolveState);
-                context->DrawFullscreenTriangle();
-                context->ResetRenderTarget();
-                context->ResetSR();
+
+                if (blendDebugTexture)
+                {
+                    context->ResetRenderTarget();
+                    context->ResetSR();
+                    context->Draw(sceneColor, blendDebugTexture);
+                    context->ResetRenderTarget();
+                    context->ResetSR();
+                }
+                else
+                {
+                    PROFILE_GPU_CPU_NAMED("V2 Shadow Lighting Resolve");
+                    context->ResetSR();
+                    context->SetViewportAndScissors((float)sceneColor->Width(), (float)sceneColor->Height());
+                    context->SetRenderTarget(sceneColor->View());
+                    resolve.UseFilteredShadow = visibilityTexture != nullptr;
+                    context->UpdateCB(resolveConstants, &resolve);
+                    context->BindCB(3, resolveConstants);
+                    context->BindSR(2, depth);
+                    context->BindSR(7, lightDepth);
+                    context->BindSR(8, receiverNormals);
+                    context->BindSR(9, baseColor);
+                    context->BindSR(10, material);
+                    context->BindSR(11, emissive);
+                    if (visibilityTexture)
+                    {
+                        context->BindSR(13, visibilityTexture);
+                        resources.SetOutput(TEXT("Shadow.Visibility"), visibilityTexture);
+                    }
+                    context->SetState(ResolveState);
+                    context->DrawFullscreenTriangle();
+                    context->ResetRenderTarget();
+                    context->ResetSR();
+                }
                 if (publishedDepth)
                 {
                     resources.Set(TEXT("Shadow.Depth"), publishedDepth);

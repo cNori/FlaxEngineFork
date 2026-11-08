@@ -592,7 +592,7 @@ void CS_V2DepthOcclusion(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
 
 #endif
 
-#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowFilter)
+#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowFilter) || defined(_PS_V2ShadowBlendReduce) || defined(_PS_V2ShadowBlendFilter) || defined(_PS_V2ShadowBlendCombine)
 
 #include "./Flax/Lighting/Lighting.hlsl"
 
@@ -612,6 +612,10 @@ float4 LightingShadowTiles[2];
 float4 LightingShadowSplit;
 float4 LightingCascadeRange; // Inner radius, fade start radius, outer radius.
 float4 LightingCascadeParameters; // Normal bias in world units, cascade index, debug enabled, screen filter radius.
+float4 ShadowBlendParameters; // Inverse target size for reduce/combine; filter axis UV step and radius for blur.
+uint ShadowBlendInputVisibility;
+uint ShadowBlendDebugMode;
+float2 ShadowBlendPadding;
 META_CB_END
 
 Texture2D<float> LightingReceiverDepth : register(t2);
@@ -709,6 +713,9 @@ float SampleV2ReceiverPlane(float2 texel, float2 receiverTexel, float4 tile, flo
 
 #if defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask)
 
+// Also use the adaptive filter when a legacy view needs an explicit mask.
+float SampleV2ShadowTile(float2 uv, float depth, float3 normal, float3 uncertainty, float2 pixel, uint tier);
+
 float2 SampleV2MaskTile(float3 receiver, float3 normal, float3 uncertainty, float3 coord, uint tier)
 {
     float4 tile = LightingShadowTiles[tier];
@@ -754,11 +761,16 @@ float2 PS_V2ShadowMask(float4 position : SV_Position) : SV_Target
     {
         float3 coord = ProjectV2Shadow(receiver, LightingLightViewProjection);
         if (IsV2ShadowCoordValid(coord))
-            farMask = SampleV2MaskTile(receiver, normal, uncertainty, coord, 0);
+            farMask = LightingShadowFilter.w > 0
+                ? float2(SampleV2ShadowTile(coord.xy, coord.z, normal, uncertainty, position.xy, 0), 0.5)
+                : SampleV2MaskTile(receiver, normal, uncertainty, coord, 0);
     }
     if (nearSample.w <= 0.0)
         return farMask;
-    return lerp(farMask, SampleV2MaskTile(receiver, normal, uncertainty, nearSample.xyz, 1), nearSample.w);
+    float2 nearMask = LightingShadowFilter.w > 0
+        ? float2(SampleV2ShadowTile(nearSample.xy, nearSample.z, normal, uncertainty, position.xy, 1), 0.5)
+        : SampleV2MaskTile(receiver, normal, uncertainty, nearSample.xyz, 1);
+    return lerp(farMask, nearMask, nearSample.w);
 }
 
 #endif
@@ -836,7 +848,7 @@ float PS_V2ShadowFilter(float4 position : SV_Position) : SV_Target
 
 #endif
 
-#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2CascadeShadowMask)
+#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowMask)
 
 #include "./Flax/Math/Noise.hlsl"
 
@@ -1032,6 +1044,80 @@ float4 PS_V2DirectionalLighting(float4 position : SV_Position) : SV_Target
     return float4(result, 1);
 }
 
+#endif
+
+#endif
+
+#if defined(_PS_V2ShadowBlendReduce) || defined(_PS_V2ShadowBlendFilter) || defined(_PS_V2ShadowBlendCombine)
+
+Texture2D<float> ShadowBlendInput : register(t14);
+Texture2D<float> ShadowBlendLow : register(t15);
+Texture2D<float> ShadowBlendMedium : register(t16);
+
+float V2CombineShadowMasks(float a, float b, float c)
+{
+    // All inputs are shadow amounts, not depth or visibility. A constrains
+    // the silhouette, and its unfiltered contribution supplies the 1/3 floor.
+    return saturate((a + b * a + c * a) / 3.0);
+}
+
+#ifdef _PS_V2ShadowBlendReduce
+META_PS(true, FEATURE_LEVEL_SM5)
+float PS_V2ShadowBlendReduce(float4 position : SV_Position) : SV_Target
+{
+    float2 uv = position.xy * ShadowBlendParameters.xy;
+    float2 offset = ShadowBlendParameters.xy * 0.25;
+    // CPU reduction steps are at most 2:1. Four bilinear taps cover the
+    // footprint instead of sampling one point in a large source texture.
+    float value = (
+        ShadowBlendInput.SampleLevel(SamplerLinearClamp, uv + float2(-offset.x, -offset.y), 0) +
+        ShadowBlendInput.SampleLevel(SamplerLinearClamp, uv + float2(offset.x, -offset.y), 0) +
+        ShadowBlendInput.SampleLevel(SamplerLinearClamp, uv + float2(-offset.x, offset.y), 0) +
+        ShadowBlendInput.SampleLevel(SamplerLinearClamp, uv + offset, 0)) * 0.25;
+    return ShadowBlendInputVisibility != 0 ? 1.0 - value : value;
+}
+#endif
+
+#ifdef _PS_V2ShadowBlendFilter
+META_PS(true, FEATURE_LEVEL_SM5)
+float PS_V2ShadowBlendFilter(float4 position : SV_Position) : SV_Target
+{
+    uint width, height;
+    ShadowBlendInput.GetDimensions(width, height);
+    float2 uv = position.xy / float2(width, height);
+    float radius = clamp(ShadowBlendParameters.z, 0.0, 8.0);
+    float sigma = max(radius * 0.5, 0.5);
+    float sum = 0.0;
+    float totalWeight = 0.0;
+    LOOP
+    for (int tap = -8; tap <= 8; tap++)
+    {
+        float support = saturate(radius + 1.0 - abs(float(tap)));
+        if (support <= 0.0)
+            continue;
+        float weight = exp(-float(tap * tap) / (2.0 * sigma * sigma)) * support;
+        sum += ShadowBlendInput.SampleLevel(SamplerLinearClamp, uv + tap * ShadowBlendParameters.xy, 0) * weight;
+        totalWeight += weight;
+    }
+    return sum / totalWeight;
+}
+#endif
+
+#ifdef _PS_V2ShadowBlendCombine
+META_PS(true, FEATURE_LEVEL_SM5)
+float PS_V2ShadowBlendCombine(float4 position : SV_Position) : SV_Target
+{
+    float2 uv = position.xy * ShadowBlendParameters.xy;
+    float a = saturate(1.0 - ShadowBlendInput.Load(int3(int2(position.xy), 0)));
+    float b = saturate(ShadowBlendLow.SampleLevel(SamplerLinearClamp, uv, 0));
+    float c = saturate(ShadowBlendMedium.SampleLevel(SamplerLinearClamp, uv, 0));
+    float shadow = V2CombineShadowMasks(a, b, c);
+    if (ShadowBlendDebugMode == 1) return shadow;
+    if (ShadowBlendDebugMode == 2) return a;
+    if (ShadowBlendDebugMode == 3) return b;
+    if (ShadowBlendDebugMode == 4) return c;
+    return 1.0 - shadow; // Lighting consumes visibility.
+}
 #endif
 
 #endif
