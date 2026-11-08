@@ -54,6 +54,8 @@ private:
     GPUTexture* CameraReceiverNear = nullptr;
     GPUTexture* CameraReceiverFar = nullptr;
     GPUBuffer* CameraReceiverCasters = nullptr;
+    GPUTexture* CameraReceiverTileMax = nullptr;
+    // Optional diagnostic resources; normal rendering never reads these back.
     GPUTexture* SelectionStepDebug = nullptr;
     GPUTexture* ReceiverTrace = nullptr;
     GPUTexture* ReceiverTraceProbe = nullptr;
@@ -64,12 +66,9 @@ private:
     double ReceiverTraceNextRead = 0;
     GPUPipelineState* ProxyDepthState = nullptr;
     GPUPipelineState* DepthCrossDebugState = nullptr;
-    struct ShadowCascadeMap
-    {
-        GPUTexture* Depth = nullptr;
-        int32 RequestedResolution = 0;
-    };
-    Array<ShadowCascadeMap> ShadowCascadeMaps;
+    // One geometry-depth target shared by every radial shadow band.
+    GPUTexture* SharedCascadeDepth = nullptr;
+    int32 SharedCascadeRequestedResolution = 0;
     RenderBuffers* LightDepthBuffers = nullptr;
     int32 RequestedAtlasWidth = 0;
     int32 RequestedAtlasHeight = 0;
@@ -99,7 +98,7 @@ private:
     bool BuildShadowMaskBlend(GPUContext* context, GPUTexture* visibility, const RenderPipelineGraphicSettings* settings);
     void OnShaderReloading(Asset* asset);
     int32 PrepareShadowAtlas(GPUDevice* device, int32 resolution, int32 farTileWidth);
-    void PrepareShadowCascadeMaps(GPUDevice* device, const RenderPipelineGraphicSettings* settings);
+    bool PrepareSharedShadowDepth(GPUDevice* device, const RenderPipelineGraphicSettings* settings);
 public:
     ~ShadowBoxCasterStage();
 
@@ -124,7 +123,7 @@ public:
     /// <summary>Requested near-tile size, or full map size in single-map mode. Limited by the GPU and atlas layout.</summary>
     API_FIELD(Attributes="Limit(512, 16384, 512)") int32 ShadowMapResolution = 2048;
 
-    /// <summary>Gets the allocated near-tile size, or full map size in single-map mode.</summary>
+    /// <summary>Gets the shared shadow-depth size, or the legacy atlas near-tile size.</summary>
     API_PROPERTY() int32 GetAllocatedShadowMapResolution() const;
 
     /// <summary>Uses adaptive light-space sampling before falling back to the other filter modes.</summary>

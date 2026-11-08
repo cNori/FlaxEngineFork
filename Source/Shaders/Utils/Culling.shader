@@ -284,7 +284,7 @@ float V2ReceiverDepthBias(float precisionBias, float2 depthPerTexel, float2 size
 }
 #endif
 
-#if defined(_CS_ShadowCasterSelection) || defined(_VS_ShadowCasterBoundsDebug) || defined(_PS_V2ShadowResourceDebug) || defined(_PS_V2LightPOVShaded) || defined(_CS_V2LightCasterVisibility) || defined(_VS_V2ShadowProxyDepth) || defined(_PS_V2ReceiverDepthCross) || defined(_PS_V2ReceiverTraceProbe) || defined(_CS_V2ProjectCameraReceivers) || defined(_CS_V2ReceiverMaskCasters)
+#if defined(_CS_ShadowCasterSelection) || defined(_VS_ShadowCasterBoundsDebug) || defined(_PS_V2ShadowResourceDebug) || defined(_PS_V2LightPOVShaded) || defined(_CS_V2LightCasterVisibility) || defined(_VS_V2ShadowProxyDepth) || defined(_PS_V2ReceiverDepthCross) || defined(_PS_V2ReceiverTraceProbe) || defined(_CS_V2ProjectCameraReceivers) || defined(_CS_V2ReceiverMaskCasters) || defined(_CS_V2ReceiverTileMax)
 
 META_CB_BEGIN(1, ShadowCasterSelectionData)
 float4x4 InverseViewProjection;
@@ -393,18 +393,58 @@ void CS_V2ProjectCameraReceivers(uint3 id : SV_DispatchThreadID)
 }
 #endif
 
-#if defined(_CS_V2ReceiverMaskCasters) || defined(_PS_V2ShadowResourceDebug)
+#if defined(_CS_V2ReceiverMaskCasters) || defined(_CS_V2ReceiverTileMax) || defined(_PS_V2ShadowResourceDebug)
 Texture2D<uint> CameraReceiverCoverage : register(t24);
 Texture2D<uint> CameraReceiverNear : register(t25);
 Texture2D<uint> CameraReceiverFar : register(t26);
+#endif
+
+#ifdef _CS_V2ReceiverTileMax
+Texture2D<float> ReceiverTileLightDepth : register(t7);
+RWTexture2D<uint> ReceiverTileMaxOutput : register(u0);
+groupshared uint TileMaximumReceiver;
+// One tile summary is shared by every caster. Zero means no eligible receiver
+// needing an expensive shadow; otherwise it stores the farthest canonical depth.
+META_CS(true, FEATURE_LEVEL_SM5)
+[numthreads(8,8,1)]
+void CS_V2ReceiverTileMax(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID, uint thread : SV_GroupIndex)
+{
+    if (thread == 0) TileMaximumReceiver = 0;
+    GroupMemoryBarrierWithGroupSync();
+    uint2 pixel = group.xy * 8 + local.xy;
+    uint2 size = uint2(SelectionShadowTiles[0].zw);
+    if (all(pixel < size))
+    {
+        uint coverage = CameraReceiverCoverage.Load(int3(pixel,0));
+        if ((coverage & 2u) != 0)
+        {
+            float nearDepth = asfloat(CameraReceiverNear.Load(int3(pixel,0)));
+            float cheap = ReceiverTileLightDepth.Load(int3(pixel,0));
+            bool alreadyShadowed = (coverage & 4u) == 0 && cheap != DEPTH_RANGE_MAX &&
+                nearDepth > DEPTH_01(cheap) + SelectionShadowSplit.w * 4;
+            if (!alreadyShadowed)
+                InterlockedMax(TileMaximumReceiver,CameraReceiverFar.Load(int3(pixel,0)));
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    if (thread == 0) ReceiverTileMaxOutput[group.xy] = TileMaximumReceiver;
+}
 #endif
 
 #ifdef _CS_V2ReceiverMaskCasters
 Texture2D<float> ReceiverMaskLightDepth : register(t7);
 StructuredBuffer<ShadowCasterBounds> ReceiverMaskBoxes : register(t3);
 StructuredBuffer<uint> ReceiverMaskLightVisibility : register(t21);
+Texture2D<uint> ReceiverTileMaximum : register(t28);
 RWStructuredBuffer<uint> ReceiverMaskCasterResults : register(u0);
 groupshared uint ReceiverMaskHit;
+groupshared float3 ReceiverRayOrigin;
+groupshared float3 ReceiverRayStepX;
+groupshared float3 ReceiverRayStepY;
+groupshared float3 ReceiverRayDelta;
+groupshared float3 ReceiverRayInverse;
+groupshared float3 ReceiverRayPadding;
+groupshared float ReceiverBoxNearest;
 
 // One group per caster, scanning only its light-space rectangle at fixed map size.
 // This produces the final conservative caster flags. The old camera-ray search
@@ -431,6 +471,7 @@ void CS_V2ReceiverMaskCasters(uint3 group : SV_GroupID, uint thread : SV_GroupIn
     }
     float2 lo = 1, hi = 0;
     bool outside = false;
+    float nearest = 1;
     UNROLL
     for (uint c=0;c<8;c++)
     {
@@ -438,6 +479,7 @@ void CS_V2ReceiverMaskCasters(uint3 group : SV_GroupID, uint thread : SV_GroupIn
             (c&2)?box.Maximum.y:box.Minimum.y,(c&4)?box.Maximum.z:box.Minimum.z);
         float3 light = ProjectV2Shadow(p,LightViewProjection);
         outside = outside || !IsV2ShadowCoordValid(light);
+        nearest = min(nearest,DEPTH_01(light.z));
         lo=min(lo,light.xy); hi=max(hi,light.xy);
     }
     // The map cannot prove absence outside its projection. Keep such casters.
@@ -450,36 +492,67 @@ void CS_V2ReceiverMaskCasters(uint3 group : SV_GroupID, uint thread : SV_GroupIn
     int2 first=max(int2(floor(lo*size))-2,0);
     int2 last=min(int2(ceil(hi*size))+2,int2(size));
     uint2 extent=uint2(max(last-first,0));
-    if (thread==0) ReceiverMaskHit=0;
-    GroupMemoryBarrierWithGroupSync();
-    for(uint n=thread;n<extent.x*extent.y;n+=64)
+    if (thread == 0)
     {
-        int2 pixel=first+int2(n%extent.x,n/extent.x);
+        ReceiverMaskHit = 0;
+        // Directional light projection is orthographic: every texel ray has the
+        // same direction, and its origin changes affinely across the map.
+        // Reconstruct this basis ONCE per caster, rather than four matrices and
+        // three divisions for every occupied texel in the rectangle.
+        float4 originH = PROJECT_POINT(float4(-1,1,DEPTH_RANGE_MIN,1),SelectionNearLightViewProjection);
+        float4 deltaH = PROJECT_POINT(float4(0,0,DEPTH_RANGE_MAX-DEPTH_RANGE_MIN,0),SelectionNearLightViewProjection);
+        float4 xH = PROJECT_POINT(float4(2.0/size.x,0,0,0),SelectionNearLightViewProjection);
+        float4 yH = PROJECT_POINT(float4(0,-2.0/size.y,0,0),SelectionNearLightViewProjection);
+        ReceiverRayOrigin = originH.xyz / originH.w;
+        ReceiverRayStepX = xH.xyz / originH.w;
+        ReceiverRayStepY = yH.xyz / originH.w;
+        ReceiverRayDelta = deltaH.xyz / originH.w;
+        ReceiverRayInverse = rcp(ReceiverRayDelta);
+        ReceiverRayPadding = abs(ReceiverRayStepX) + abs(ReceiverRayStepY);
+        float3 lightDepthAxis = float3(LightViewProjection[0][2],LightViewProjection[1][2],LightViewProjection[2][2]);
+        ReceiverBoxNearest = max(0,nearest-dot(abs(lightDepthAxis),ReceiverRayPadding));
+    }
+    GroupMemoryBarrierWithGroupSync();
+    float3 paddedMinimum = box.Minimum - ReceiverRayPadding;
+    float3 paddedMaximum = box.Maximum + ReceiverRayPadding;
+    bool tiled = (CasterDebugFlags & 262144u) != 0;
+    int2 firstTile = first >> 3;
+    uint2 tileExtent = uint2(((last + 7) >> 3) - firstTile);
+    uint scanCount = tiled ? tileExtent.x * tileExtent.y : extent.x * extent.y;
+    for(uint n=tiled?0:thread;n<scanCount;n+=tiled?1:64)
+    {
+        // A stale zero only causes extra work; seeing a hit lets other lanes stop.
+        // The final group barrier still precedes publication of the atomic flag.
+        if (ReceiverMaskHit != 0) break;
+        int2 pixel;
+        if (tiled)
+        {
+            int2 tile = firstTile + int2(n % tileExtent.x,n / tileExtent.x);
+            uint farthestBits = ReceiverTileMaximum.Load(int3(tile,0));
+            // Max reduction proves ALL receivers in the tile are in front of the
+            // padded box. No centre/corner heuristic or averaged depth is used.
+            if (farthestBits == 0 || asfloat(farthestBits) <= ReceiverBoxNearest + SelectionShadowSplit.w) continue;
+            pixel = tile * 8 + int2(thread & 7u,thread >> 3);
+            if (any(pixel < first) || any(pixel >= last)) continue;
+        }
+        else pixel=first+int2(n%extent.x,n/extent.x);
         uint coverage=CameraReceiverCoverage.Load(int3(pixel,0));
         if ((coverage&2u)==0) continue;
         float receiverNear=asfloat(CameraReceiverNear.Load(int3(pixel,0)));
         float receiverFar=asfloat(CameraReceiverFar.Load(int3(pixel,0)));
-        float2 ndc=(float2(pixel)+0.5)/size*float2(2,-2)+float2(-1,1);
-        float4 nearH=PROJECT_POINT(float4(ndc,DEPTH_RANGE_MIN,1),SelectionNearLightViewProjection);
-        float4 farH=PROJECT_POINT(float4(ndc,DEPTH_RANGE_MAX,1),SelectionNearLightViewProjection);
-        float3 start=nearH.xyz/nearH.w;
-        float3 delta=farH.xyz/farH.w-start;
-        // Expand by one texel in world space to cover the receiver splat footprint.
-        // Otherwise a subpixel box could fall between light-texel centre rays.
-        float4 xH=PROJECT_POINT(float4(ndc+float2(2.0/size.x,0),DEPTH_RANGE_MIN,1),SelectionNearLightViewProjection);
-        float4 yH=PROJECT_POINT(float4(ndc+float2(0,2.0/size.y),DEPTH_RANGE_MIN,1),SelectionNearLightViewProjection);
-        float3 pad=abs(xH.xyz/xH.w-start)+abs(yH.xyz/yH.w-start);
+        float3 start = ReceiverRayOrigin + ReceiverRayStepX * (pixel.x + 0.5) + ReceiverRayStepY * (pixel.y + 0.5);
+        float3 delta = ReceiverRayDelta;
         float enter=0,leave=1;
         bool hit=true;
         UNROLL
         for(uint axis=0;axis<3;axis++)
         {
             if(abs(delta[axis])<1e-8)
-                hit=hit && start[axis]>=box.Minimum[axis]-pad[axis] && start[axis]<=box.Maximum[axis]+pad[axis];
+                hit=hit && start[axis]>=paddedMinimum[axis] && start[axis]<=paddedMaximum[axis];
             else
             {
-                float a=(box.Minimum[axis]-pad[axis]-start[axis])/delta[axis];
-                float b=(box.Maximum[axis]+pad[axis]-start[axis])/delta[axis];
+                float a=(paddedMinimum[axis]-start[axis])*ReceiverRayInverse[axis];
+                float b=(paddedMaximum[axis]-start[axis])*ReceiverRayInverse[axis];
                 enter=max(enter,min(a,b)); leave=min(leave,max(a,b));
             }
         }
@@ -1641,6 +1714,13 @@ float4 PS_V2ShadowResourceDebug(float4 position : SV_Position) : SV_Target
     }
     uint width, height;
     ShadowDebugResource.GetDimensions(width, height);
+    // A cascade debug snapshot uses the shared maximum-size allocation. Only
+    // the cascade's logical top-left tile was rendered; crop the display to it.
+    if (mode == 4 && (CasterDebugFlags & 131072u) != 0)
+    {
+        width = min(width, (uint)SelectionShadowTiles[0].z);
+        height = min(height, (uint)SelectionShadowTiles[0].w);
+    }
     float2 sourceSize = float2(width, height);
     float scale = min(outputSize.x / sourceSize.x, outputSize.y / sourceSize.y);
     float2 uv = ((localPosition - outputSize * 0.5) / scale + sourceSize * 0.5) / sourceSize;

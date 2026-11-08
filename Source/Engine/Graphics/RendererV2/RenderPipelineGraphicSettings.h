@@ -36,7 +36,7 @@ API_ENUM() enum class ShadowResourceDebugView
     ReceiverDepthCross = 10,
     /// <summary>Step 4: receiver footprints from selected casters hidden from the camera. Cyan is camera-occluded; magenta is outside its frustum.</summary>
     HiddenCasterContributions = 11,
-    /// <summary>Traces one caster through the actual receiver-selection compute shader. Uses Receiver Debug Step and the actor-name filter.</summary>
+    /// <summary>Traces one caster through the legacy receiver diagnostic shader. Uses Receiver Debug Step and the actor-name filter; final selection uses the shared camera/light mask.</summary>
     ReceiverShaderSteps = 12,
     /// <summary>Camera-visible surfaces reprojected into the shared light map. Green can receive light; purple faces away; black has no camera sample.</summary>
     CameraReceiverCoverage = 13,
@@ -44,6 +44,8 @@ API_ENUM() enum class ShadowResourceDebugView
     CameraReceiverLightDepth = 14,
     /// <summary>Camera-visible receiver depths crossed with cheap light depth: green matches/precedes it, red is behind, yellow contains mixed depths, blue has no cheap blocker.</summary>
     CameraReceiverLightCross = 15,
+    /// <summary>Colours radial shadow bands and their transitions. Takes priority over other debug overlays; all bands share the same light-depth map.</summary>
+    CascadeBands = 16,
 };
 
 /// <summary>Intermediate data written by the actual receiver-selection kernel for one caster.</summary>
@@ -96,7 +98,7 @@ API_STRUCT() struct FLAXENGINE_API ShadowCascadeSettings : ISerializable
     API_AUTO_SERIALIZATION();
     DECLARE_SCRIPTING_TYPE_MINIMAL(ShadowCascadeSettings);
 
-    /// <summary>Requested width and height of the square shadow map in texels.</summary>
+    /// <summary>Requested shadow resolution. The largest band value selects the shared depth size when Shadow Depth Resolution is zero. Bands share one projection and depth draw.</summary>
     API_FIELD(Attributes="Limit(512, 16384, 512)")
     int32 TextureSize = 2048;
 
@@ -159,15 +161,19 @@ class FLAXENGINE_API RenderPipelineGraphicSettings : public ScriptingObject, pub
     API_AUTO_SERIALIZATION();
 public:
     /// <summary>
-    /// Directional shadow cascade configuration in increasing end-distance order.
+    /// Directional shadow band configuration in increasing end-distance order. All bands resolve a single light-depth render.
     /// The final entry continues over the remaining view without fading out. An empty list uses the near and far atlas.
     /// </summary>
     API_FIELD(Attributes="EditorDisplay(\"Shadows\")")
     Array<ShadowCascadeSettings> ShadowCascades;
 
-    /// <summary>Colors the active shadow cascade at each receiver pixel, including the blend between ranges.</summary>
-    API_FIELD(Attributes="EditorDisplay(\"Shadows\")")
+    /// <summary>Colours radial shadow bands and their blend transitions. Takes priority over resource, receiver-hit and mask-blend debug views.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\")")
     bool ShowShadowCascades = false;
+
+    /// <summary>Resolution of the single directional-light depth render shared by all shadow bands. Zero uses the largest Texture Size in Shadow Cascades. A common projection covers all bands, so increasing coverage reduces world-space texel density.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadows\"), Limit(0, 16384, 512)")
+    int32 ShadowDepthResolution = 0;
 
     /// <summary>Overlays receiver pixels hit by expensive caster bounds. Orange: camera-visible caster; cyan: occluded caster; magenta: outside the camera frustum. Enables exhaustive diagnostic scanning.</summary>
     API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\")")
@@ -205,7 +211,7 @@ public:
     API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\")")
     bool ReadReceiverDebugPixel = false;
 
-    /// <summary>Original cascade-array index displayed by the Cascade Depth resource view.</summary>
+    /// <summary>Legacy cascade-array debug index. Cascade Depth displays the common light-depth map for every band.</summary>
     API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\"), Limit(0)")
     int32 ShadowResourceCascadeIndex = 0;
 
