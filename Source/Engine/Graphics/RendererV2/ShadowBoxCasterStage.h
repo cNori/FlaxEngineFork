@@ -6,7 +6,9 @@
 #include "Engine/Content/AssetReference.h"
 #include "Engine/Core/Math/Vector3.h"
 #include "Engine/Core/Math/Color.h"
+#include "Engine/Core/Math/Vector4.h"
 
+class FontAsset;
 class FrustumCullStage;
 class OcclusionCullStage;
 class Shader;
@@ -15,6 +17,7 @@ class GPUDevice;
 class GPUTexture;
 class GPUPipelineState;
 class RenderBuffers;
+class RenderPipelineDrawStage;
 class RenderPipelineGraphicSettings;
 
 /// <summary>Selects directional shadow casters using projected world-space bounds.</summary>
@@ -44,6 +47,23 @@ private:
     GPUBuffer* IndirectOutput = nullptr;
     GPUBuffer* IndirectArguments = nullptr;
     GPUTexture* DebugMask = nullptr;
+    GPUTexture* CandidateOccluderDepth = nullptr;
+    GPUBuffer* LightVisibilityBuffer = nullptr;
+    GPUTexture* ProxyShadowDepth = nullptr;
+    GPUTexture* CameraReceiverMask = nullptr;
+    GPUTexture* CameraReceiverNear = nullptr;
+    GPUTexture* CameraReceiverFar = nullptr;
+    GPUBuffer* CameraReceiverCasters = nullptr;
+    GPUTexture* SelectionStepDebug = nullptr;
+    GPUTexture* ReceiverTrace = nullptr;
+    GPUTexture* ReceiverTraceProbe = nullptr;
+    GPUTexture* ReceiverTraceReadback = nullptr;
+    GPUPipelineState* ReceiverTraceProbeState = nullptr;
+    AssetReference<FontAsset> ReceiverTraceFont;
+    Float4 ReceiverTraceValue = Float4::Zero;
+    double ReceiverTraceNextRead = 0;
+    GPUPipelineState* ProxyDepthState = nullptr;
+    GPUPipelineState* DepthCrossDebugState = nullptr;
     struct ShadowCascadeMap
     {
         GPUTexture* Depth = nullptr;
@@ -54,6 +74,13 @@ private:
     int32 RequestedAtlasWidth = 0;
     int32 RequestedAtlasHeight = 0;
     GPUPipelineState* DebugState = nullptr;
+    GPUPipelineState* CasterBoundsDebugState = nullptr;
+    GPUPipelineState* ResourceDebugState = nullptr;
+    RenderPipelineDrawStage* LightDebugDrawStage = nullptr;
+    GPUTexture* LightDebugColor = nullptr;
+    GPUTexture* LightDebugShadedColor = nullptr;
+    GPUPipelineState* LightDebugShadingState = nullptr;
+    GPUTexture* ResourceDebugComposite = nullptr;
     GPUPipelineState* ResolveState = nullptr;
     GPUPipelineState* ShadowMaskState = nullptr;
     GPUPipelineState* CascadeMaskState = nullptr;
@@ -81,6 +108,12 @@ public:
 
     /// <summary>Overlays camera pixels reached by an expensive caster's box.</summary>
     API_FIELD() bool ShowReceiverHits = false;
+
+    /// <summary>Draws green wire boxes for expensive casters accepted by the potential-receiver test.</summary>
+    API_FIELD() bool ShowSelectedExpensiveCasters = false;
+
+    /// <summary>Draws red wire boxes for expensive casters rejected by the potential-receiver test. Boxes are visible through geometry.</summary>
+    API_FIELD() bool ShowRejectedExpensiveCasters = false;
 
     /// <summary>Submits expensive shadow draws using GPU selection without a CPU readback.</summary>
     API_FIELD() bool UseIndirectShadowDraws = true;
@@ -128,7 +161,7 @@ public:
     /// <summary>Expensive caster candidates requiring a receiver scan in the last view, before GPU selection.</summary>
     API_PROPERTY() int32 GetProxyCasterCount() const { return LastProxyCasterCount; }
 
-    /// <summary>Receiver-selection compute dispatches issued for the last view.</summary>
+    /// <summary>Potential-caster receiver-search dispatches issued for the last view. One dispatch is shared by all cascades.</summary>
     API_PROPERTY() int32 GetSelectionDispatchCount() const { return LastSelectionDispatchCount; }
 
     /// <summary>Configured cascade slices processed in the last view. Zero uses the legacy atlas path.</summary>

@@ -5,7 +5,75 @@
 #include "Engine/Core/Collections/Array.h"
 #include "Engine/Scripting/ScriptingObject.h"
 #include "Engine/Core/ISerializable.h"
+#include "Engine/Core/Types/String.h"
+#include "Engine/Core/Math/Vector2.h"
 
+
+/// <summary>Displays a shadow-stage GPU resource beside the scene, or coloured caster footprints over the scene.</summary>
+API_ENUM() enum class ShadowResourceDebugView
+{
+    /// <summary>Displays normal pipeline output.</summary>
+    None = 0,
+    /// <summary>Camera depth reconstructed as distance. White is near; black reaches the debug depth distance.</summary>
+    ReceiverDepth = 1,
+    /// <summary>Raw encoded receiver normals from the GBuffer.</summary>
+    ReceiverNormals = 2,
+    /// <summary>The shared cheap-occluder light-depth map.</summary>
+    CandidateOccluderDepth = 3,
+    /// <summary>The depth map of the selected cascade, or the atlas for the legacy path.</summary>
+    CascadeDepth = 4,
+    /// <summary>The resolved shadow visibility mask. White is lit; black is shadow.</summary>
+    ShadowVisibility = 5,
+    /// <summary>Colours projected receiver footprints over the scene. Each expensive caster has a stable colour derived from its identifier.</summary>
+    CasterSelection = 6,
+    /// <summary>Shows the main camera output and a material-colour scene render from the directional light side by side. Disables visibility-colour overlays in this view.</summary>
+    CameraAndLight = 7,
+    /// <summary>Step 1: light-space wire boxes. Green remains potentially light-visible; red is fully blocked by opaque cheap geometry.</summary>
+    LightCasterVisibility = 8,
+    /// <summary>Step 2: shared light depth containing cheap meshes and light-visible expensive caster boxes.</summary>
+    ProxyShadowDepth = 9,
+    /// <summary>Step 3: camera-visible receivers crossed with proxy light depth. Orange can receive a proxy shadow; blue has no proxy blocker; dark gray faces away from the light; purple has no surface.</summary>
+    ReceiverDepthCross = 10,
+    /// <summary>Step 4: receiver footprints from selected casters hidden from the camera. Cyan is camera-occluded; magenta is outside its frustum.</summary>
+    HiddenCasterContributions = 11,
+    /// <summary>Traces one caster through the actual receiver-selection compute shader. Uses Receiver Debug Step and the actor-name filter.</summary>
+    ReceiverShaderSteps = 12,
+    /// <summary>Camera-visible surfaces reprojected into the shared light map. Green can receive light; purple faces away; black has no camera sample.</summary>
+    CameraReceiverCoverage = 13,
+    /// <summary>Nearest eligible camera-visible receiver depth in light space. Scaled by Shadow Debug Depth Distance, measured from the shared light near plane.</summary>
+    CameraReceiverLightDepth = 14,
+    /// <summary>Camera-visible receiver depths crossed with cheap light depth: green matches/precedes it, red is behind, yellow contains mixed depths, blue has no cheap blocker.</summary>
+    CameraReceiverLightCross = 15,
+};
+
+/// <summary>Intermediate data written by the actual receiver-selection kernel for one caster.</summary>
+API_ENUM() enum class ShadowReceiverDebugStep
+{
+    /// <summary>R is decision code: 1 outside sweep, 2 no camera surface, 3 light-blocked, 4 ray miss, 5 back-facing, 7 proxy miss, 8 cheap-blocked, 9 accepted, 10 accepted with uncertainty.</summary>
+    Decision = 0,
+    /// <summary>R raw camera depth; G distance from camera in cm; B camera-depth uncertainty in cm; A one.</summary>
+    CameraDepth = 1,
+    /// <summary>RGB reconstructed world position in cm; A one.</summary>
+    WorldPosition = 2,
+    /// <summary>RGB geometric normal (or fallback shading normal); A one for a reliable plane, zero for fallback.</summary>
+    SurfaceNormal = 3,
+    /// <summary>RGB displacement of the selection probe in cm; A configured receiver bias in cm.</summary>
+    ReceiverBias = 4,
+    /// <summary>R/G light UV, B receiver light-space depth, A one for valid coordinates.</summary>
+    LightProjection = 5,
+    /// <summary>R/G minimum/maximum proxy depth separation in cm; B tolerance in cm; A valid-tap bitmask.</summary>
+    ProxyDepthDifference = 6,
+    /// <summary>R/G minimum/maximum cheap-occluder depth separation in cm; B tolerance in cm; A valid-tap bitmask.</summary>
+    CheapDepthDifference = 7,
+    /// <summary>R precision tolerance in cm; G camera-depth uncertainty in cm; B combined tolerance in cm; A one.</summary>
+    ComparisonTolerance = 8,
+    /// <summary>R reliable-plane flag; G normal dot light direction; B camera-depth uncertainty in cm; A one.</summary>
+    SurfaceConfidence = 9,
+    /// <summary>R valid cheap taps, G blocking cheap taps (bitmasks), B tolerance in cm; A one.</summary>
+    CheapTapCoverage = 10,
+    /// <summary>R valid proxy taps, G potential proxy taps (bitmasks), B tolerance in cm; A one.</summary>
+    ProxyTapCoverage = 11,
+};
 
 /// <summary>Filtering applied by a directional shadow cascade.</summary>
 API_ENUM() enum class ShadowCascadeFilterMode
@@ -100,6 +168,58 @@ public:
     /// <summary>Colors the active shadow cascade at each receiver pixel, including the blend between ranges.</summary>
     API_FIELD(Attributes="EditorDisplay(\"Shadows\")")
     bool ShowShadowCascades = false;
+
+    /// <summary>Overlays receiver pixels hit by expensive caster bounds. Orange: camera-visible caster; cyan: occluded caster; magenta: outside the camera frustum. Enables exhaustive diagnostic scanning.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\")")
+    bool ShowShadowReceiverHits = false;
+
+    /// <summary>Offset opposite the surface normal in centimeters used only by shadow caster selection. Keeps receiver tests off the occluder surface. Does not change final shadow-map depth or normal bias. Excessive values can discard small contact shadows.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadows\"), Limit(0.0f, 100.0f, 0.01f), ValueCategory(Utils.ValueCategory.Distance)")
+    float ShadowSelectionReceiverBias = 0.1f;
+
+    /// <summary>Displays a GPU resource beside the scene. Caster Selection instead overlays per-caster colours on receiver surfaces. Purple checkerboard means a resource is unavailable.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\")")
+    ShadowResourceDebugView ShadowResourceDebug = ShadowResourceDebugView::None;
+
+    /// <summary>Uses the whole viewport for resource textures. When disabled, textures appear in a right-side panel and the scene remains visible.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\")")
+    bool ShadowResourceDebugFullscreen = false;
+
+    /// <summary>Exact source actor name to inspect. Empty includes all casters. Filters debug footprints and wire boxes only, without changing rendering selection.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\")")
+    String ShadowDebugCasterName;
+
+    /// <summary>Intermediate receiver-kernel data to inspect in Receiver Shader Steps. A negative A value means the pixel exited at an earlier decision; its magnitude is the reason code.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\")")
+    ShadowReceiverDebugStep ReceiverDebugStep = ShadowReceiverDebugStep::Decision;
+
+    /// <summary>Display range in cm for signed depth separation and spatial grid size. Does not change selection tolerance.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\"), Limit(0.001f), ValueCategory(Utils.ValueCategory.Distance)")
+    float ReceiverDebugRange = 1.0f;
+
+    /// <summary>Camera pixel to inspect. Negative coordinates select the center. A crosshair marks the sampled pixel in the side panel.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\")")
+    Float2 ReceiverDebugPixel = Float2(-1, -1);
+
+    /// <summary>Reads the probe's four raw values every quarter second while tracing. Debug only: the readback can synchronize the CPU and GPU.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\")")
+    bool ReadReceiverDebugPixel = false;
+
+    /// <summary>Original cascade-array index displayed by the Cascade Depth resource view.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\"), Limit(0)")
+    int32 ShadowResourceCascadeIndex = 0;
+
+    /// <summary>Distance in centimeters mapped to black by the Receiver Depth viewer. This changes display only.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\"), Limit(1), ValueCategory(Utils.ValueCategory.Distance)")
+    float ShadowDebugDepthDistance = 2000.0f;
+
+    /// <summary>Draws green wire boxes for expensive casters accepted by the view/light-wide potential-receiver test.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\")")
+    bool ShowSelectedExpensiveShadowCasters = false;
+
+    /// <summary>Draws red wire boxes for expensive casters rejected by the potential-receiver test. Debug boxes remain visible through geometry.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadow Debug\")")
+    bool ShowRejectedExpensiveShadowCasters = false;
 
     /// <summary>Builds two filtered lower-resolution masks from the completed cascade visibility and applies (A + B*A + C*A) / 3. No additional geometry draws.</summary>
     API_FIELD(Attributes="EditorDisplay(\"Shadow Mask Blend\")")
