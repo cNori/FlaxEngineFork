@@ -121,8 +121,6 @@ void CS_HZBCull(uint DispatchThreadId : SV_DispatchThreadID)
 
 #endif
 
-static const float V2ShadowDepthBias = 0.0005;
-
 float3 ProjectV2Shadow(float3 receiver, float4x4 projection)
 {
     float4 clip = PROJECT_POINT(float4(receiver, 1), projection);
@@ -144,7 +142,7 @@ float V2ShadowTierWeight(float3 coord, float viewDepth, float2 split, float2 til
     return borderWeight * (1.0 - smoothstep(split.x, split.y, viewDepth));
 }
 
-#if defined(_CS_ShadowCasterSelection) || defined(_PS_V2DirectionalLighting)
+#if defined(_CS_ShadowCasterSelection) || defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask)
 float2 V2ShadowDepthPerTexel(float3 normal, float4x4 lightProjection, float2 size)
 {
     // The directional projection has orthogonal axes. Invert each scale to
@@ -160,6 +158,82 @@ float2 V2ShadowDepthPerTexel(float3 normal, float4x4 lightProjection, float2 siz
         return 0;
     float2 plane = float2(-2.0 * dot(normal, x) / dot(x, x), 2.0 * dot(normal, y) / dot(y, y));
     return plane * (dot(z, z) / normalZ) / size;
+}
+
+float2 V2DepthAxisGradient(Texture2D<float> depthTexture, float depth, int2 pixel, int2 axis, int2 size)
+{
+    // Fit device depth, which is affine over a rasterized triangle. A wider
+    // stencil reduces D24 quantization, while extrapolation rejects silhouettes.
+    // Edge selection follows https://atyuwen.github.io/posts/normal-reconstruction/
+    const int radius = 4;
+    int2 l1 = pixel - axis * radius;
+    int2 l2 = pixel - axis * (2 * radius);
+    int2 r1 = pixel + axis * radius;
+    int2 r2 = pixel + axis * (2 * radius);
+    float a = depthTexture.Load(int3(clamp(l1, 0, size - 1), 0));
+    float b = depthTexture.Load(int3(clamp(l2, 0, size - 1), 0));
+    float c = depthTexture.Load(int3(clamp(r1, 0, size - 1), 0));
+    float d = depthTexture.Load(int3(clamp(r2, 0, size - 1), 0));
+    const float tolerance = 4.0 / 16777215.0;
+    bool left = all(l2 >= 0) && a != DEPTH_RANGE_MAX && b != DEPTH_RANGE_MAX &&
+        abs((a - depth) * 2.0 - (b - depth)) <= tolerance;
+    bool right = all(r2 < size) && c != DEPTH_RANGE_MAX && d != DEPTH_RANGE_MAX &&
+        abs((c - depth) * 2.0 - (d - depth)) <= tolerance;
+    if (left && right)
+        return float2(((c - a) + 2.0 * (d - b)) / (10.0 * radius), 1);
+    if (left)
+        return float2(((depth - a) + 2.0 * (depth - b)) / (5.0 * radius), 1);
+    if (right)
+        return float2(((c - depth) + 2.0 * (d - depth)) / (5.0 * radius), 1);
+    return 0;
+}
+
+float3 V2ReceiverPlaneNormal(Texture2D<float> depthTexture, float3 receiver, float depth, int2 pixel, float2 size,
+    float4x4 inverseViewProjection, float3 shadingNormal)
+{
+    float2 xGradient = V2DepthAxisGradient(depthTexture, depth, pixel, int2(1, 0), int2(size));
+    float2 yGradient = V2DepthAxisGradient(depthTexture, depth, pixel, int2(0, 1), int2(size));
+    if (xGradient.y == 0 || yGradient.y == 0)
+        return shadingNormal;
+    float2 gradient = float2(xGradient.x, yGradient.x);
+
+    // Differentiate homogeneous unprojection without subtracting large world positions.
+    float4 dx = PROJECT_POINT(float4(2.0 / size.x, 0, gradient.x, 0), inverseViewProjection);
+    float4 dy = PROJECT_POINT(float4(0, -2.0 / size.y, gradient.y, 0), inverseViewProjection);
+    float3 planeNormal = cross(dx.xyz - receiver * dx.w, dy.xyz - receiver * dy.w);
+    float lengthSquared = dot(planeNormal, planeNormal);
+    float agreement = dot(planeNormal, shadingNormal);
+    // At a silhouette the quad may straddle two surfaces.
+    if (lengthSquared <= 0 || agreement * agreement < 0.36 * lengthSquared)
+        return shadingNormal;
+    return planeNormal * ((agreement < 0 ? -1.0 : 1.0) * rsqrt(lengthSquared));
+}
+
+float3 V2OffsetShadowReceiver(float3 receiver, float3 normal, float3 directionToLight, float normalBias)
+{
+    float cosine = saturate(dot(normal, directionToLight));
+    float offset = normalBias * sqrt(saturate(1.0 - cosine * cosine));
+    return receiver + normal * offset;
+}
+
+float3 V2CameraDepthUncertainty(float3 receiver, float homogeneousW, float4x4 inverseViewProjection)
+{
+    // The opaque GBuffer depth is D24. Allow two steps for rasterization and storage error.
+    const float cameraDepthError = 2.0 / 16777215.0;
+    float4 depthDerivative = PROJECT_POINT(float4(0, 0, 1, 0), inverseViewProjection);
+    return (depthDerivative.xyz - receiver * depthDerivative.w) * (cameraDepthError / homogeneousW);
+}
+
+float V2ReceiverDepthBias(float precisionBias, float2 depthPerTexel, float2 size,
+    float4x4 lightProjection, float3 receiverUncertainty)
+{
+    // Carry camera-depth error through both light depth and the receiver-plane UV correction.
+    float4 lightError = PROJECT_POINT(float4(receiverUncertainty, 0), lightProjection);
+    float2 texelError = lightError.xy * size * float2(0.5, -0.5);
+    float cameraBias = abs(lightError.z - dot(depthPerTexel, texelError));
+
+    float slope = dot(abs(depthPerTexel), float2(1, 1));
+    return precisionBias + cameraBias + 0.125 * min(slope, rcp(min(size.x, size.y)));
 }
 #endif
 
@@ -184,6 +258,7 @@ float4 SelectionShadowTiles[2];
 float4 SelectionShadowSplit;
 float4 SelectionCameraPosition;
 float4 SelectionCameraForward;
+float4 SelectionReceiverRange; // Inner and outer camera radii. Zero end selects the legacy path.
 META_CB_END
 
 struct ShadowCasterBounds
@@ -202,12 +277,16 @@ RWStructuredBuffer<uint> CasterSelection : register(u1);
 RWTexture2D<uint> ReceiverHits : register(u2);
 groupshared uint ProxyHit;
 
-bool IsAlreadyShadowed(float3 receiver, float3 normal, uint tier)
+bool IsAlreadyShadowed(float3 receiver, float3 normal, uint tier, uint2 pixel, float cameraDepth, float receiverW)
 {
     if (!HasLightDepth)
         return false;
     float4x4 projection = tier == 0 ? LightViewProjection : SelectionNearLightViewProjection;
-    float3 coord = ProjectV2Shadow(receiver, projection);
+    if (HasReceiverNormals)
+        normal = V2ReceiverPlaneNormal(ReceiverDepth, receiver, cameraDepth, int2(pixel), float2(Width, Height),
+            InverseViewProjection, normal);
+    float3 biasedReceiver = V2OffsetShadowReceiver(receiver, normal, DirectionToLight, SelectionCameraPosition.w);
+    float3 coord = ProjectV2Shadow(biasedReceiver, projection);
     if (!IsV2ShadowCoordValid(coord))
         return false;
 
@@ -219,14 +298,16 @@ bool IsAlreadyShadowed(float3 receiver, float3 normal, uint tier)
     if (any(first < 0) || any(first + 1 >= int2(size)))
         return false;
     int margin = (int)ceil(ShadowSelectionFilterRadius);
-    float2 depthPerTexel = margin > 0 ? V2ShadowDepthPerTexel(normal, projection, size) : 0;
+    float2 depthPerTexel = V2ShadowDepthPerTexel(normal, projection, size);
+    float3 uncertainty = V2CameraDepthUncertainty(receiver, receiverW, InverseViewProjection);
+    float bias = V2ReceiverDepthBias(SelectionShadowSplit.w, depthPerTexel, size, projection, uncertainty);
     UNROLL
     for (uint tap = 0; tap < 4; tap++)
     {
         int2 texel = first + int2(tap & 1, tap >> 1);
         float blocker = LightDepth.Load(int3(origin + texel, 0));
         float depth = coord.z + dot(depthPerTexel, texel - receiverTexel);
-        if (blocker == DEPTH_RANGE_MAX || DEPTH_DIFF(depth, blocker) <= V2ShadowDepthBias)
+        if (blocker == DEPTH_RANGE_MAX || DEPTH_DIFF(depth, blocker) <= bias)
             return false;
     }
 
@@ -244,7 +325,7 @@ bool IsAlreadyShadowed(float3 receiver, float3 normal, uint tier)
                 int2 texel = first + int2(x, y);
                 float blocker = LightDepth.Load(int3(origin + texel, 0));
                 float depth = coord.z + dot(depthPerTexel, texel - receiverTexel);
-                if (blocker == DEPTH_RANGE_MAX || DEPTH_DIFF(depth, blocker) <= V2ShadowDepthBias)
+                if (blocker == DEPTH_RANGE_MAX || DEPTH_DIFF(depth, blocker) <= bias)
                     return false;
             }
         }
@@ -297,6 +378,18 @@ void CS_ShadowCasterSelection(uint3 group : SV_GroupID, uint thread : SV_GroupIn
     float3 offset = -DirectionToLight * ProjectionDistance;
     float3 boundsMin = box.Minimum + min(offset, 0);
     float3 boundsMax = box.Maximum + max(offset, 0);
+    if (SelectionReceiverRange.y > 0.0)
+    {
+        float3 nearOffset = max(max(boundsMin - SelectionCameraPosition.xyz, SelectionCameraPosition.xyz - boundsMax), 0.0);
+        float3 farOffset = max(abs(boundsMin - SelectionCameraPosition.xyz), abs(boundsMax - SelectionCameraPosition.xyz));
+        if (dot(farOffset, farOffset) < SelectionReceiverRange.x * SelectionReceiverRange.x ||
+            dot(nearOffset, nearOffset) >= SelectionReceiverRange.y * SelectionReceiverRange.y)
+        {
+            if (thread == 0)
+                CasterSelection[caster] = 0;
+            return;
+        }
+    }
     float2 minUV = 1, maxUV = 0;
     UNROLL
     for (uint corner = 0; corner < 8; corner++)
@@ -348,16 +441,24 @@ void CS_ShadowCasterSelection(uint3 group : SV_GroupID, uint thread : SV_GroupIn
             if ((tier == 1 && nearWeight <= 0.0) || (tier == 0 && nearWeight >= 1.0))
                 continue;
         }
+        if (SelectionReceiverRange.y > 0.0)
+        {
+            float3 delta = receiverPosition - SelectionCameraPosition.xyz;
+            float distanceSquared = dot(delta, delta);
+            if (distanceSquared < SelectionReceiverRange.x * SelectionReceiverRange.x ||
+                distanceSquared >= SelectionReceiverRange.y * SelectionReceiverRange.y)
+                continue;
+        }
         if (!IntersectsCaster(receiverPosition, box.Minimum, box.Maximum))
             continue;
         float3 normal = 0;
         if (HasReceiverNormals)
         {
-            normal = ShadowReceiverNormals.Load(int3(pixel, 0)).xyz * 2.0 - 1.0;
+            normal = normalize(ShadowReceiverNormals.Load(int3(pixel, 0)).xyz * 2.0 - 1.0);
             if (dot(normal, DirectionToLight) <= 0.01)
                 continue;
         }
-        if (IsAlreadyShadowed(receiverPosition, normal, tier))
+        if (IsAlreadyShadowed(receiverPosition, normal, tier, pixel, depth, receiver.w))
             continue;
 
         InterlockedOr(ProxyHit, tierBit);
@@ -491,7 +592,7 @@ void CS_V2DepthOcclusion(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
 
 #endif
 
-#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2ShadowFilter)
+#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowFilter)
 
 #include "./Flax/Lighting/Lighting.hlsl"
 
@@ -509,6 +610,8 @@ float4 LightingShadowFilter; // Light depth range, projection scale in pixels, t
 float4x4 LightingNearLightViewProjection;
 float4 LightingShadowTiles[2];
 float4 LightingShadowSplit;
+float4 LightingCascadeRange; // Inner radius, fade start radius, outer radius.
+float4 LightingCascadeParameters; // Normal bias in world units, cascade index, debug enabled, screen filter radius.
 META_CB_END
 
 Texture2D<float> LightingReceiverDepth : register(t2);
@@ -520,10 +623,15 @@ Texture2D<float4> LightingEmissive : register(t11);
 Texture2D<float2> RawShadowMask : register(t12);
 Texture2D<float> FilteredShadowMask : register(t13);
 
-float3 ReconstructV2Receiver(float2 pixelCenter, float depth, float2 size)
+float4 ReconstructV2ReceiverH(float2 pixelCenter, float depth, float2 size)
 {
     float2 ndc = pixelCenter / size * float2(2, -2) + float2(-1, 1);
-    float4 receiver = PROJECT_POINT(float4(ndc, depth, 1), LightingInverseViewProjection);
+    return PROJECT_POINT(float4(ndc, depth, 1), LightingInverseViewProjection);
+}
+
+float3 ReconstructV2Receiver(float2 pixelCenter, float depth, float2 size)
+{
+    float4 receiver = ReconstructV2ReceiverH(pixelCenter, depth, size);
     return receiver.xyz / receiver.w;
 }
 
@@ -546,39 +654,84 @@ float4 V2NearShadowSample(float3 receiver)
         LightingShadowTiles[1].zw, LightingShadowFilter.w));
 }
 
-float SampleV2ShadowCoverage(float2 uv, float depth, float4 tile)
+#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask)
+float2 V2InvAtlasSize()
 {
-    // Match the bias and four-texel footprint used by caster selection.
-#if REVERSE_Z
-    const float receiverDepth = depth + V2ShadowDepthBias;
-    const bool fullyLit = receiverDepth >= 1.0;
-#else
-    const float receiverDepth = depth - V2ShadowDepthBias;
-    const bool fullyLit = receiverDepth <= 0.0;
-#endif
     uint width, height;
     LightingLightDepth.GetDimensions(width, height);
-    float2 atlasUV = (tile.xy + clamp(uv * tile.zw, 0.5, tile.zw - 0.5)) / float2(width, height);
-    float coverage = LightingLightDepth.SampleCmpLevelZero(ShadowSamplerLinear, atlasUV, saturate(receiverDepth));
-    return fullyLit ? 1.0 : coverage;
+    return 1.0 / float2(width, height);
+}
+
+float4x4 V2LightingShadowProjection(uint tier)
+{
+    return tier == 0 ? LightingLightViewProjection : LightingNearLightViewProjection;
+}
+
+float4 GatherV2ReceiverSeparation(float2 texel, float2 receiverTexel, float4 tile, float2 invAtlasSize,
+    float depth, float2 depthPerTexel, float bias, out float2 blend)
+{
+    // Gather order is bottom-left, bottom-right, top-right, top-left.
+    // Clamp the footprint to this tile before gathering, including atlas seams.
+    float2 clamped = clamp(texel, 0, tile.zw - 1);
+    float2 first = min(floor(clamped), tile.zw - 2);
+    blend = clamped - first;
+#if CAN_USE_GATHER && !defined(WGSL)
+    float4 blockers = LightingLightDepth.GatherRed(SamplerPointClamp, (tile.xy + first + 1.0) * invAtlasSize);
+#else
+    int2 origin = int2(tile.xy + first);
+    float4 blockers = float4(
+        LightingLightDepth.Load(int3(origin + int2(0, 1), 0)),
+        LightingLightDepth.Load(int3(origin + int2(1, 1), 0)),
+        LightingLightDepth.Load(int3(origin + int2(1, 0), 0)),
+        LightingLightDepth.Load(int3(origin, 0)));
+#endif
+    float2 x = (first.x + float2(0, 1) - receiverTexel.x) * depthPerTexel.x;
+    float2 y = (first.y + float2(0, 1) - receiverTexel.y) * depthPerTexel.y;
+    float4 receiverDepth = depth + x.xyyx + y.yyxx;
+    float4 separation = max(DEPTH_DIFF(receiverDepth, blockers) - bias, 0.0);
+    return separation * float4(blockers != DEPTH_RANGE_MAX);
+}
+
+float BlendV2ShadowQuad(float4 values, float2 blend)
+{
+    return lerp(lerp(values.w, values.z, blend.x), lerp(values.x, values.y, blend.x), blend.y);
+}
+
+float SampleV2ReceiverPlane(float2 texel, float2 receiverTexel, float4 tile, float2 invAtlasSize,
+    float depth, float2 depthPerTexel, float bias)
+{
+    float2 blend;
+    float4 separation = GatherV2ReceiverSeparation(texel, receiverTexel, tile, invAtlasSize, depth, depthPerTexel, bias, blend);
+    return BlendV2ShadowQuad(float4(separation <= 0.0), blend);
+}
+
+#endif
+
+#if defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask)
+
+float2 SampleV2MaskTile(float3 receiver, float3 normal, float3 uncertainty, float3 coord, uint tier)
+{
+    float4 tile = LightingShadowTiles[tier];
+    float2 receiverTexel = coord.xy * tile.zw - 0.5;
+    float4x4 projection = V2LightingShadowProjection(tier);
+    float2 depthPerTexel = V2ShadowDepthPerTexel(normal, projection, tile.zw);
+    float bias = V2ReceiverDepthBias(LightingShadowSplit.w, depthPerTexel, tile.zw, projection, uncertainty);
+    float coverage = SampleV2ReceiverPlane(receiverTexel, receiverTexel, tile, V2InvAtlasSize(), coord.z, depthPerTexel, bias);
+    if (coverage >= 1.0)
+        return float2(1, 0.5);
+
+    float2 texel = floor(receiverTexel + 0.5);
+    float blocker = LightingLightDepth.Load(int3(int2(tile.xy + texel), 0));
+    float receiverDepth = coord.z + dot(depthPerTexel, texel - receiverTexel);
+    float separation = DEPTH_DIFF(receiverDepth, blocker);
+    if (blocker == DEPTH_RANGE_MAX || separation <= bias)
+        return float2(coverage, 0.5);
+
+    float penumbra = (separation - bias) * LightingShadowFilter.x * LightingShadowFilter.z;
+    return float2(coverage, clamp(penumbra * V2PixelsPerWorldUnit(receiver), 0.5, 4.0));
 }
 
 #ifdef _PS_V2ShadowMask
-
-float2 SampleV2MaskTile(float3 receiver, float2 uv, float lightDepth, float4 tile)
-{
-    const float coverage = SampleV2ShadowCoverage(uv, lightDepth, tile);
-    if (coverage >= 1.0)
-        return float2(1, 1);
-
-    float blocker = LightingLightDepth.Load(int3(int2(tile.xy + floor(uv * tile.zw)), 0));
-    float separation = DEPTH_DIFF(lightDepth, blocker);
-    if (separation <= V2ShadowDepthBias)
-        return float2(coverage, 1);
-
-    float penumbra = separation * LightingShadowFilter.x * LightingShadowFilter.z;
-    return float2(coverage, clamp(1.0 + penumbra * V2PixelsPerWorldUnit(receiver), 1.0, 4.0));
-}
 
 META_PS(true, FEATURE_LEVEL_SM5)
 float2 PS_V2ShadowMask(float4 position : SV_Position) : SV_Target
@@ -586,23 +739,29 @@ float2 PS_V2ShadowMask(float4 position : SV_Position) : SV_Target
     int3 pixel = int3(int2(position.xy), 0);
     float depth = LightingReceiverDepth.Load(pixel);
     if (depth == DEPTH_RANGE_MAX)
-        return float2(1, 1);
+        return float2(1, 0.5);
 
     uint width, height;
     LightingReceiverDepth.GetDimensions(width, height);
-    float3 receiver = ReconstructV2Receiver(position.xy, depth, float2(width, height));
+    float4 receiverH = ReconstructV2ReceiverH(position.xy, depth, float2(width, height));
+    float3 receiver = receiverH.xyz / receiverH.w;
+    float3 uncertainty = V2CameraDepthUncertainty(receiver, receiverH.w, LightingInverseViewProjection);
     float4 nearSample = V2NearShadowSample(receiver);
-    float2 farMask = float2(1, 1);
+    float3 normal = V2ReceiverPlaneNormal(LightingReceiverDepth, receiver, depth, pixel.xy, float2(width, height),
+        LightingInverseViewProjection, DecodeNormal(LightingNormals.Load(pixel).xyz));
+    float2 farMask = float2(1, 0.5);
     if (nearSample.w < 1.0)
     {
         float3 coord = ProjectV2Shadow(receiver, LightingLightViewProjection);
         if (IsV2ShadowCoordValid(coord))
-            farMask = SampleV2MaskTile(receiver, coord.xy, coord.z, LightingShadowTiles[0]);
+            farMask = SampleV2MaskTile(receiver, normal, uncertainty, coord, 0);
     }
     if (nearSample.w <= 0.0)
         return farMask;
-    return lerp(farMask, SampleV2MaskTile(receiver, nearSample.xy, nearSample.z, LightingShadowTiles[1]), nearSample.w);
+    return lerp(farMask, SampleV2MaskTile(receiver, normal, uncertainty, nearSample.xyz, 1), nearSample.w);
 }
+
+#endif
 
 #endif
 
@@ -620,6 +779,10 @@ float PS_V2ShadowFilter(float4 position : SV_Position) : SV_Target
     RawShadowMask.GetDimensions(width, height);
     int2 size = int2(width, height);
     float2 center = RawShadowMask.Load(int3(pixel, 0));
+    // Adaptive and hard bands carry a half-pixel support. Their interiors
+    // already contain the final shadow result and need no screen-space blur.
+    if (LightingCascadeRange.w != 0.0 && center.y <= 0.5)
+        return center.x;
     static const int2 offsets[12] = {
         int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1),
         int2(-1, -1), int2(1, -1), int2(-1, 1), int2(1, 1),
@@ -651,7 +814,7 @@ float PS_V2ShadowFilter(float4 position : SV_Position) : SV_Target
             continue;
         float2 sampleMask = samples[tap];
         float distance = length(float2(offsets[tap]));
-        float radius = max(center.y, sampleMask.y);
+        float radius = LightingCascadeRange.w != 0.0 ? center.y : max(center.y, sampleMask.y);
         float weight = saturate(1.0 - distance / (radius + 0.5));
         if (weight <= 0)
             continue;
@@ -673,35 +836,11 @@ float PS_V2ShadowFilter(float4 position : SV_Position) : SV_Target
 
 #endif
 
-#ifdef _PS_V2DirectionalLighting
+#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2CascadeShadowMask)
 
 #include "./Flax/Math/Noise.hlsl"
 
-float SampleV2ReceiverPlane(float2 texel, float2 receiverTexel, float4 tile, float2 invAtlasSize, float depth, float2 depthPerTexel)
-{
-    // Gather order is bottom-left, bottom-right, top-right, top-left.
-    // Clamp the footprint to this tile before gathering, including atlas seams.
-    float2 clamped = clamp(texel, 0, tile.zw - 1);
-    float2 first = min(floor(clamped), tile.zw - 2);
-    float2 blend = clamped - first;
-#if CAN_USE_GATHER && !defined(WGSL)
-    float4 blockers = LightingLightDepth.GatherRed(SamplerPointClamp, (tile.xy + first + 1.0) * invAtlasSize);
-#else
-    int2 origin = int2(tile.xy + first);
-    float4 blockers = float4(
-        LightingLightDepth.Load(int3(origin + int2(0, 1), 0)),
-        LightingLightDepth.Load(int3(origin + int2(1, 1), 0)),
-        LightingLightDepth.Load(int3(origin + int2(1, 0), 0)),
-        LightingLightDepth.Load(int3(origin, 0)));
-#endif
-    float2 x = (first.x + float2(0, 1) - receiverTexel.x) * depthPerTexel.x;
-    float2 y = (first.y + float2(0, 1) - receiverTexel.y) * depthPerTexel.y;
-    float4 receiverDepth = depth + x.xyyx + y.yyxx;
-    float4 visible = float4((blockers == DEPTH_RANGE_MAX) | (DEPTH_DIFF(receiverDepth, blockers) <= V2ShadowDepthBias));
-    return lerp(lerp(visible.w, visible.z, blend.x), lerp(visible.x, visible.y, blend.x), blend.y);
-}
-
-float SampleV2ShadowTile(float2 uv, float depth, float3 normal, float2 pixel, uint tier)
+float SampleV2ShadowTile(float2 uv, float depth, float3 normal, float3 uncertainty, float2 pixel, uint tier)
 {
     float4 tile = LightingShadowTiles[tier];
     uint width, height;
@@ -710,6 +849,7 @@ float SampleV2ShadowTile(float2 uv, float depth, float3 normal, float2 pixel, ui
     float2 receiverTexel = uv * tile.zw - 0.5;
     float4x4 projection = tier == 0 ? LightingLightViewProjection : LightingNearLightViewProjection;
     float2 depthPerTexel = V2ShadowDepthPerTexel(normal, projection, tile.zw);
+    float bias = V2ReceiverDepthBias(LightingShadowSplit.w, depthPerTexel, tile.zw, projection, uncertainty);
     const float noise = InterleavedGradientNoise(pixel);
     float sine, cosine;
     sincos(noise * 6.2831853, sine, cosine);
@@ -720,14 +860,14 @@ float SampleV2ShadowTile(float2 uv, float depth, float3 normal, float2 pixel, ui
 
     // GPU Gems 2, chapter 17. Probe the disk perimeter before refining mixed coverage.
     float2 offsets[8];
-    float total = SampleV2ReceiverPlane(receiverTexel, receiverTexel, tile, invAtlasSize, depth, depthPerTexel);
+    float total = SampleV2ReceiverPlane(receiverTexel, receiverTexel, tile, invAtlasSize, depth, depthPerTexel, bias);
     UNROLL
     for (uint i = 0; i < 8; i++)
     {
         float2 direction = directions[i];
         offsets[i] = float2(cosine * direction.x - sine * direction.y, sine * direction.x + cosine * direction.y) * LightingShadowFilter.w;
         float radius = 0.84 + 0.16 * frac(noise + i * 0.618034);
-        total += SampleV2ReceiverPlane(receiverTexel + offsets[i] * radius, receiverTexel, tile, invAtlasSize, depth, depthPerTexel);
+        total += SampleV2ReceiverPlane(receiverTexel + offsets[i] * radius, receiverTexel, tile, invAtlasSize, depth, depthPerTexel, bias);
     }
     float sampleCount = 9.0;
     BRANCH
@@ -737,15 +877,74 @@ float SampleV2ShadowTile(float2 uv, float depth, float3 normal, float2 pixel, ui
         for (uint tap = 0; tap < 8; tap++)
         {
             float jitter = frac(noise + tap * 0.381966);
-            total += SampleV2ReceiverPlane(receiverTexel + offsets[tap] * lerp(0.18, 0.55, jitter), receiverTexel, tile, invAtlasSize, depth, depthPerTexel);
-            total += SampleV2ReceiverPlane(receiverTexel + offsets[tap] * lerp(0.58, 0.81, 1.0 - jitter), receiverTexel, tile, invAtlasSize, depth, depthPerTexel);
+            total += SampleV2ReceiverPlane(receiverTexel + offsets[tap] * lerp(0.18, 0.55, jitter), receiverTexel, tile, invAtlasSize, depth, depthPerTexel, bias);
+            total += SampleV2ReceiverPlane(receiverTexel + offsets[tap] * lerp(0.58, 0.81, 1.0 - jitter), receiverTexel, tile, invAtlasSize, depth, depthPerTexel, bias);
         }
         sampleCount = 25.0;
     }
     return total / sampleCount;
 }
 
-float SampleV2Shadow(float3 receiver, float3 normal, float2 pixel)
+#endif
+
+#ifdef _PS_V2CascadeShadowMask
+
+META_PS(true, FEATURE_LEVEL_SM5)
+float4 PS_V2CascadeShadowMask(float4 position : SV_Position) : SV_Target
+{
+    int3 pixel = int3(int2(position.xy), 0);
+    float depth = LightingReceiverDepth.Load(pixel);
+    if (depth == DEPTH_RANGE_MAX)
+        discard;
+
+    uint width, height;
+    LightingReceiverDepth.GetDimensions(width, height);
+    float2 size = float2(width, height);
+    float4 receiverH = ReconstructV2ReceiverH(position.xy, depth, size);
+    float3 receiver = receiverH.xyz / receiverH.w;
+    float receiverDistance = length(receiver - LightingCameraPosition);
+    if (receiverDistance < LightingCascadeRange.x || receiverDistance >= LightingCascadeRange.z)
+        discard;
+
+    float3 normal = V2ReceiverPlaneNormal(LightingReceiverDepth, receiver, depth, pixel.xy, size,
+        LightingInverseViewProjection, DecodeNormal(LightingNormals.Load(pixel).xyz));
+    float3 biasedReceiver = V2OffsetShadowReceiver(receiver, normal, LightingDirectionToLight, LightingCascadeParameters.x);
+    float3 coord = ProjectV2Shadow(biasedReceiver, LightingLightViewProjection);
+    if (!IsV2ShadowCoordValid(coord))
+        discard;
+
+    float weight = LightingCascadeRange.y < LightingCascadeRange.z
+        ? 1.0 - smoothstep(LightingCascadeRange.y, LightingCascadeRange.z, receiverDistance) : 1.0;
+    if (LightingCascadeParameters.z != 0)
+    {
+        static const float3 colors[8] = {
+            float3(0.95, 0.2, 0.18), float3(0.2, 0.85, 0.3),
+            float3(0.2, 0.5, 1.0), float3(1.0, 0.75, 0.15),
+            float3(0.85, 0.25, 0.95), float3(0.1, 0.85, 0.9),
+            float3(1.0, 0.45, 0.1), float3(0.7, 0.7, 0.7)
+        };
+        return float4(colors[(uint)LightingCascadeParameters.y % 8], weight);
+    }
+    float3 uncertainty = V2CameraDepthUncertainty(receiver, receiverH.w, LightingInverseViewProjection);
+    float2 mask;
+    BRANCH
+    if (LightingShadowFilter.w > 0)
+        mask = float2(SampleV2ShadowTile(coord.xy, coord.z, normal, uncertainty, position.xy, 0), 0.5);
+    else
+    {
+        mask = SampleV2MaskTile(receiver, normal, uncertainty, coord, 0);
+        // Blend radius alongside visibility so filter changes use the same
+        // radial transition, including transitions into a hard or adaptive band.
+        mask.y = clamp(mask.y, 0.5, max(LightingCascadeParameters.w, 0.5));
+    }
+    return float4(mask, 0, weight);
+}
+
+#endif
+
+#ifdef _PS_V2DirectionalLighting
+
+float SampleV2Shadow(float3 receiver, float3 normal, float3 uncertainty, float2 pixel)
 {
     float4 nearSample = V2NearShadowSample(receiver);
     uint firstTier = nearSample.w >= 1.0 ? 1 : 0;
@@ -761,9 +960,16 @@ float SampleV2Shadow(float3 receiver, float3 normal, float2 pixel)
         {
             BRANCH
             if (LightingShadowFilter.w > 0)
-                shadow = SampleV2ShadowTile(coord.xy, coord.z, normal, pixel, tier);
+                shadow = SampleV2ShadowTile(coord.xy, coord.z, normal, uncertainty, pixel, tier);
             else
-                shadow = SampleV2ShadowCoverage(coord.xy, coord.z, LightingShadowTiles[tier]);
+            {
+                float4 tile = LightingShadowTiles[tier];
+                float2 texel = coord.xy * tile.zw - 0.5;
+                float4x4 projection = V2LightingShadowProjection(tier);
+                float2 depthPerTexel = V2ShadowDepthPerTexel(normal, projection, tile.zw);
+                float bias = V2ReceiverDepthBias(LightingShadowSplit.w, depthPerTexel, tile.zw, projection, uncertainty);
+                shadow = SampleV2ReceiverPlane(texel, texel, tile, V2InvAtlasSize(), coord.z, depthPerTexel, bias);
+            }
         }
         visibility += shadow * weight;
     }
@@ -797,7 +1003,8 @@ float4 PS_V2DirectionalLighting(float4 position : SV_Position) : SV_Target
 
     uint width, height;
     LightingReceiverDepth.GetDimensions(width, height);
-    surface.WorldPos = ReconstructV2Receiver(position.xy, depth, float2(width, height));
+    float4 receiverH = ReconstructV2ReceiverH(position.xy, depth, float2(width, height));
+    surface.WorldPos = receiverH.xyz / receiverH.w;
 
     float3 light = LightingDirectionToLight;
     float nDotL = saturate(dot(surface.Normal, light));
@@ -810,9 +1017,17 @@ float4 PS_V2DirectionalLighting(float4 position : SV_Position) : SV_Target
         BRANCH
         if (LightingUseFilteredShadow)
             visibility = FilteredShadowMask.Load(pixel);
+        else if (LightingCascadeRange.w != 0.0)
+            visibility = 1.0;
         else
-            visibility = SampleV2Shadow(surface.WorldPos, surface.Normal, position.xy);
-        result += (response.Diffuse + response.Specular) * nDotL * visibility * LightingRadiance.rgb * max(LightingRadiance.a, 0.0);
+        {
+            float3 planeNormal = V2ReceiverPlaneNormal(LightingReceiverDepth, surface.WorldPos, depth, pixel.xy, float2(width, height),
+                LightingInverseViewProjection, surface.Normal);
+            float3 uncertainty = V2CameraDepthUncertainty(surface.WorldPos, receiverH.w, LightingInverseViewProjection);
+            visibility = SampleV2Shadow(surface.WorldPos, planeNormal, uncertainty, position.xy);
+        }
+        result += (response.Diffuse + response.Specular) * visibility *
+            nDotL * LightingRadiance.rgb * max(LightingRadiance.a, 0.0);
     }
     return float4(result, 1);
 }

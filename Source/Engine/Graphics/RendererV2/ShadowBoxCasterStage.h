@@ -15,6 +15,7 @@ class GPUDevice;
 class GPUTexture;
 class GPUPipelineState;
 class RenderBuffers;
+class RenderPipelineGraphicSettings;
 
 /// <summary>Selects directional shadow casters using projected world-space bounds.</summary>
 API_CLASS() class FLAXENGINE_API ShadowBoxCasterStage : public RenderPipelineStage
@@ -37,17 +38,27 @@ private:
     GPUBuffer* IndirectOutput = nullptr;
     GPUBuffer* IndirectArguments = nullptr;
     GPUTexture* DebugMask = nullptr;
+    struct ShadowCascadeMap
+    {
+        GPUTexture* Depth = nullptr;
+        int32 RequestedResolution = 0;
+    };
+    Array<ShadowCascadeMap> ShadowCascadeMaps;
     RenderBuffers* LightDepthBuffers = nullptr;
     int32 RequestedAtlasWidth = 0;
     int32 RequestedAtlasHeight = 0;
     GPUPipelineState* DebugState = nullptr;
     GPUPipelineState* ResolveState = nullptr;
     GPUPipelineState* ShadowMaskState = nullptr;
+    GPUPipelineState* CascadeMaskState = nullptr;
+    GPUPipelineState* CascadeDebugState = nullptr;
+    GPUTexture* CascadeDebug = nullptr;
     GPUPipelineState* ShadowFilterState = nullptr;
     GPUTexture* ShadowMask = nullptr;
     GPUTexture* FilteredShadowMask = nullptr;
     void OnShaderReloading(Asset* asset);
     int32 PrepareShadowAtlas(GPUDevice* device, int32 resolution, int32 farTileWidth);
+    void PrepareShadowCascadeMaps(GPUDevice* device, const RenderPipelineGraphicSettings* settings);
 public:
     ~ShadowBoxCasterStage();
 

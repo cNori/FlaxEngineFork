@@ -28,6 +28,65 @@ namespace
     constexpr int32 MaximumShadowResolution = 16384;
     constexpr int32 FarShadowResolution = 512;
 
+    int32 InitShadowDepthMap(GPUDevice* device, GPUTexture* depth, int32 resolution, int32 farTileWidth)
+    {
+        const PixelFormat formats[] = { PixelFormat::D16_UNorm, GPU_DEPTH_BUFFER_PIXEL_FORMAT, PixelFormat::D32_Float };
+        const int32 minResolution = Math::Min(resolution, FarShadowResolution);
+        for (int32 size = resolution; ; size = Math::Max(minResolution, size / 2))
+        {
+            // Keep the original depth format for the default size and prefer D16 for large maps.
+            for (int32 i = size > 4096 ? 0 : 1; i < ARRAY_COUNT(formats); i++)
+            {
+                const auto format = formats[i];
+                const auto sampleFormat = PixelFormatExtensions::FindShaderResourceFormat(format, false);
+                if (!EnumHasAllFlags(device->GetFormatFeatures(format).Support, FormatSupport::DepthStencil | FormatSupport::Texture2D) ||
+                    !EnumHasAllFlags(device->GetFormatFeatures(sampleFormat).Support, FormatSupport::ShaderSample | FormatSupport::ShaderSampleComparison))
+                    continue;
+                const auto desc = GPUTextureDescription::New2D(size + farTileWidth, size, format,
+                    GPUTextureFlags::ShaderResource | GPUTextureFlags::DepthStencil);
+                if (!depth->Init(desc))
+                    return size;
+            }
+            if (size == minResolution)
+                return 0;
+        }
+    }
+
+    float GetShadowDepthPrecisionBias(PixelFormat format)
+    {
+        const float roundoff = 4.0f * 1.192092896e-7f;
+        if (format == PixelFormat::D16_UNorm)
+            return roundoff + 1.0f / 65535.0f;
+        if (format == PixelFormat::D24_UNorm_S8_UInt)
+            return roundoff + 1.0f / 16777215.0f;
+        return roundoff;
+    }
+
+    bool FitShadowSphere(const Float3& cameraPosition, const Matrix& lightView, const BoundingBox& lightBounds,
+                         float endDistance, float filterRadius, int32 resolution, BoundingBox& bounds)
+    {
+        Float3 lightCenter;
+        Float3::TransformCoordinate(cameraPosition, lightView, lightCenter);
+        const float diameter = 2.0f * endDistance;
+        const float padding = Math::Max(diameter * ((filterRadius + 2.0f) / resolution), 1.0f);
+        const Float2 sceneMin(Float3(lightBounds.Minimum) - Float3::One);
+        const Float2 sceneMax(Float3(lightBounds.Maximum) + Float3::One);
+        const Float2 center(lightCenter);
+        const Float2 radius(diameter * 0.5f + padding);
+        if (center.X + radius.X <= sceneMin.X || center.X - radius.X >= sceneMax.X ||
+            center.Y + radius.Y <= sceneMin.Y || center.Y - radius.Y >= sceneMax.Y)
+            return false;
+
+        const Float2 span = Float2::Min(radius * 2.0f, sceneMax - sceneMin);
+        const Float2 texel = span / (float)resolution;
+        const Float2 offset = center - span * 0.5f - sceneMin;
+        const Float2 snapped = Float2::Clamp(sceneMin + Float2::Round(offset / texel) * texel, sceneMin, sceneMax - span);
+        const Float2 end = snapped + span;
+        bounds = BoundingBox(Vector3(snapped.X, snapped.Y, lightBounds.Minimum.Z - 1),
+                             Vector3(end.X, end.Y, lightBounds.Maximum.Z + 1));
+        return true;
+    }
+
     struct ShadowSweepPlane
     {
         Plane Boundary;
@@ -93,7 +152,9 @@ namespace
         Float4 ShadowFilter;
         Matrix NearLightViewProjection;
         Float4 ShadowTiles[2];
-        Float4 ShadowSplit;
+        Float4 ShadowSplit; // Near blend start, blend end, near tier enabled, depth precision bias.
+        Float4 CascadeRange;
+        Float4 CascadeParameters; // Normal bias in world units, cascade index, debug enabled, screen filter radius.
     });
 
     GPU_CB_STRUCT(SelectionConstants
@@ -113,9 +174,10 @@ namespace
         float FilterRadius;
         Matrix NearLightViewProjection;
         Float4 ShadowTiles[2];
-        Float4 ShadowSplit;
+        Float4 ShadowSplit; // Near blend start, blend end, near tier enabled, depth precision bias.
         Float4 CameraPosition;
         Float4 CameraForward;
+        Float4 ReceiverRange; // Inner and outer radial receiver distances.
     });
 }
 
@@ -131,6 +193,9 @@ ShadowBoxCasterStage::~ShadowBoxCasterStage()
     SAFE_DELETE_GPU_RESOURCE(DebugState);
     SAFE_DELETE_GPU_RESOURCE(ResolveState);
     SAFE_DELETE_GPU_RESOURCE(ShadowMaskState);
+    SAFE_DELETE_GPU_RESOURCE(CascadeMaskState);
+    SAFE_DELETE_GPU_RESOURCE(CascadeDebugState);
+    SAFE_DELETE_GPU_RESOURCE(CascadeDebug);
     SAFE_DELETE_GPU_RESOURCE(ShadowFilterState);
     SAFE_DELETE_GPU_RESOURCE(ShadowMask);
     SAFE_DELETE_GPU_RESOURCE(FilteredShadowMask);
@@ -139,6 +204,10 @@ ShadowBoxCasterStage::~ShadowBoxCasterStage()
     SAFE_DELETE_GPU_RESOURCE(IndirectOutput);
     SAFE_DELETE_GPU_RESOURCE(IndirectArguments);
     SAFE_DELETE_GPU_RESOURCE(DebugMask);
+    for (auto& map : ShadowCascadeMaps)
+    {
+        SAFE_DELETE_GPU_RESOURCE(map.Depth);
+    }
     if (LightDepthBuffers)
         Delete(LightDepthBuffers);
     SAFE_DELETE_GPU_RESOURCE(BoundsBuffer);
@@ -153,6 +222,10 @@ void ShadowBoxCasterStage::OnShaderReloading(Asset* asset)
         ResolveState->ReleaseGPU();
     if (ShadowMaskState)
         ShadowMaskState->ReleaseGPU();
+    if (CascadeMaskState)
+        CascadeMaskState->ReleaseGPU();
+    if (CascadeDebugState)
+        CascadeDebugState->ReleaseGPU();
     if (ShadowFilterState)
         ShadowFilterState->ReleaseGPU();
 }
@@ -179,30 +252,39 @@ int32 ShadowBoxCasterStage::PrepareShadowAtlas(GPUDevice* device, int32 resoluti
     if (RequestedAtlasWidth == width && RequestedAtlasHeight == resolution && depth->GetMemoryUsage())
         return depth->Height();
 
-    // The light views only write depth. Keep the RenderBuffers object for material binding.
-    const PixelFormat formats[] = { PixelFormat::D16_UNorm, GPU_DEPTH_BUFFER_PIXEL_FORMAT, PixelFormat::D32_Float };
-    const int32 minResolution = Math::Min(resolution, FarShadowResolution);
-    for (int32 size = resolution; ; size = Math::Max(minResolution, size / 2))
+    const int32 size = InitShadowDepthMap(device, depth, resolution, farTileWidth);
+    if (size)
     {
-        // Keep the original depth format for the default size and prefer D16 for large maps.
-        for (int32 i = size > 4096 ? 0 : 1; i < ARRAY_COUNT(formats); i++)
+        RequestedAtlasWidth = width;
+        RequestedAtlasHeight = resolution;
+    }
+    return size;
+}
+
+void ShadowBoxCasterStage::PrepareShadowCascadeMaps(GPUDevice* device, const RenderPipelineGraphicSettings* settings)
+{
+    const int32 count = settings ? settings->ShadowCascades.Count() : 0;
+    for (int32 i = count; i < ShadowCascadeMaps.Count(); i++)
+    {
+        SAFE_DELETE_GPU_RESOURCE(ShadowCascadeMaps[i].Depth);
+    }
+    ShadowCascadeMaps.Resize(count);
+
+    const int32 limit = Math::Min(MaximumShadowResolution, device->Limits.MaximumTexture2DSize);
+    for (int32 i = 0; i < count; i++)
+    {
+        auto& map = ShadowCascadeMaps[i];
+        const int32 resolution = Math::Min(Math::Max(settings->ShadowCascades[i].TextureSize, FarShadowResolution), limit);
+        if (map.RequestedResolution == resolution && (!map.Depth || map.Depth->GetMemoryUsage()))
+            continue;
+
+        SAFE_DELETE_GPU_RESOURCE(map.Depth);
+        map.RequestedResolution = resolution;
+        map.Depth = device->CreateTexture(TEXT("V2 Shadow Cascade Depth"));
+        if (map.Depth && !InitShadowDepthMap(device, map.Depth, resolution, 0))
         {
-            const auto format = formats[i];
-            const auto sampleFormat = PixelFormatExtensions::FindShaderResourceFormat(format, false);
-            if (!EnumHasAllFlags(device->GetFormatFeatures(format).Support, FormatSupport::DepthStencil | FormatSupport::Texture2D) ||
-                !EnumHasAllFlags(device->GetFormatFeatures(sampleFormat).Support, FormatSupport::ShaderSample | FormatSupport::ShaderSampleComparison))
-                continue;
-            const auto desc = GPUTextureDescription::New2D(size + farTileWidth, size, format,
-                GPUTextureFlags::ShaderResource | GPUTextureFlags::DepthStencil);
-            if (!depth->Init(desc))
-            {
-                RequestedAtlasWidth = width;
-                RequestedAtlasHeight = resolution;
-                return size;
-            }
+            SAFE_DELETE_GPU_RESOURCE(map.Depth);
         }
-        if (size == minResolution)
-            return 0;
     }
 }
 
@@ -298,18 +380,72 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     const int32 farTileWidth = useTiers ? FarShadowResolution : 0;
     int32 resolution = Math::Min(Math::Clamp(requestedShadowResolution, FarShadowResolution, MaximumShadowResolution), atlasLimit - farTileWidth);
     GPUTexture* lightDepth = nullptr;
+    bool useConfiguredCascades = false;
+    int32 smallestCascade = atlasLimit;
     if (context == device->GetMainContext())
     {
-        resolution = PrepareShadowAtlas(device, resolution, farTileWidth);
-        if (resolution == 0)
-            return StageResult::Completed;
-        lightDepth = LightDepthBuffers->DepthBuffer;
+        if (settings && !settings->ShadowCascades.IsEmpty() && ShadowCascadeMaps.IsEmpty() && LightDepthBuffers)
+            LightDepthBuffers->DepthBuffer->ReleaseGPU();
+        PrepareShadowCascadeMaps(device, settings);
+        for (const auto& map : ShadowCascadeMaps)
+        {
+            if (map.Depth)
+            {
+                lightDepth = map.Depth;
+                smallestCascade = Math::Min(smallestCascade, map.Depth->Width());
+            }
+        }
+        useConfiguredCascades = lightDepth != nullptr;
+        if (useConfiguredCascades)
+        {
+            // Material binding still uses RenderBuffers even when depth targets are separate.
+            if (!LightDepthBuffers)
+                LightDepthBuffers = New<RenderBuffers>();
+            else if (LightDepthBuffers->DepthBuffer->GetMemoryUsage())
+                LightDepthBuffers->DepthBuffer->ReleaseGPU();
+        }
+        else
+        {
+            resolution = PrepareShadowAtlas(device, resolution, farTileWidth);
+            if (resolution == 0)
+                return StageResult::Completed;
+            lightDepth = LightDepthBuffers->DepthBuffer;
+        }
     }
     const int32 farResolution = useTiers ? FarShadowResolution : resolution;
-    const float filterRadius = adaptiveFilter && !ShowReceiverHits
+    const float inheritedRadius = adaptiveFilter && !ShowReceiverHits
         ? Math::Clamp(adaptiveRadius, 0.0f, 4.0f) : 0.0f;
+    float filterRadius = useConfiguredCascades ? 0.0f : inheritedRadius;
+    struct CascadeFilter
+    {
+        float AdaptiveRadius;
+        float ScreenRadius;
+        float AngularTangent;
+    };
+    Array<CascadeFilter, InlinedAllocation<8>> cascadeFilters;
+    float maxNormalBias = 0.0f;
+    if (useConfiguredCascades)
+    {
+        for (const auto& cascade : settings->ShadowCascades)
+        {
+            const bool inherit = cascade.FilterMode == ShadowCascadeFilterMode::Inherit;
+            const auto mode = inherit ?
+                (inheritedRadius > 0 ? ShadowCascadeFilterMode::Adaptive :
+                    (screenSpaceFilter ? ShadowCascadeFilterMode::ScreenSpace : ShadowCascadeFilterMode::Hard)) :
+                cascade.FilterMode;
+            const float radius = Math::Clamp(cascade.FilterRadius, 0.0f, 4.0f);
+            CascadeFilter filter;
+            filter.AdaptiveRadius = mode == ShadowCascadeFilterMode::Adaptive ? (inherit ? inheritedRadius : radius) : 0.0f;
+            filter.ScreenRadius = mode == ShadowCascadeFilterMode::ScreenSpace ? (inherit ? 4.0f : radius) : 0.0f;
+            const float angle = Math::Clamp(inherit ? angularRadius : cascade.AngularRadius, 0.0f, 45.0f);
+            filter.AngularTangent = Math::Tan(angle * DegreesToRadians);
+            cascadeFilters.Add(filter);
+            filterRadius = Math::Max(filterRadius, filter.AdaptiveRadius);
+            maxNormalBias = Math::Max(maxNormalBias, Math::Clamp(cascade.NormalBias, 0.0f, 10.0f));
+        }
+    }
     float sweepPadding = 0.0f;
-    if (filterRadius > 0)
+    if (filterRadius > 0 || maxNormalBias > 0)
     {
         // The world diagonal bounds both fitted light-space axes before caster rejection.
         Float3 minimum = bounds[0].Minimum;
@@ -319,12 +455,37 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
             minimum = Float3::Min(minimum, box.Minimum);
             maximum = Float3::Max(maximum, box.Maximum);
         }
-        sweepPadding = (filterRadius + 1.0f) * ((maximum - minimum).Length() + 2.0f) / farResolution * 1.415f;
+        const int32 minResolution = useConfiguredCascades ? smallestCascade : farResolution;
+        sweepPadding = (filterRadius + 1.0f + maxNormalBias) * ((maximum - minimum).Length() + 2.0f) / minResolution * 1.415f;
     }
+    Matrix lightView;
+    BoundingBox lightBounds;
+    Array<BoundingBox> lightCasterBounds;
+    const Float3 direction(LightDirection);
+    if (lightDepth)
+    {
+        const Float3 up = Math::Abs(direction.Y) > 0.99f ? Float3::Right : Float3::Up;
+        Matrix::LookAt(Float3::Zero, direction, up, lightView);
+        lightCasterBounds.EnsureCapacity(bounds.Count());
+    }
+
     int32 keptCount = 0;
     for (int32 i = 0; i < bounds.Count(); i++)
     {
-        if (bounds[i].UseProxy && !CanReachView(bounds[i], sweepPlanes, sweepPadding))
+        const bool keep = !bounds[i].UseProxy || CanReachView(bounds[i], sweepPlanes, sweepPadding);
+        if (lightDepth)
+        {
+            // Fit before view rejection so a caster entering the camera frustum cannot resize the atlas projection.
+            const BoundingBox box(Vector3(bounds[i].Minimum), Vector3(bounds[i].Maximum));
+            const BoundingBox transformed = BoundingBox::Transform(box, lightView);
+            if (i == 0)
+                lightBounds = transformed;
+            else
+                BoundingBox::Merge(lightBounds, transformed, lightBounds);
+            if (keep)
+                lightCasterBounds.Add(transformed);
+        }
+        if (!keep)
             continue;
         bounds[keptCount] = bounds[i];
         Casters[keptCount++] = Casters[i];
@@ -379,11 +540,10 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     SelectionConstants data = {};
     float lightDepthRange = 0.0f;
     RenderContext lightContexts[2];
-    const Viewport tileViewports[2] = {
+    Viewport tileViewports[2] = {
         Viewport(0.0f, 0.0f, (float)farResolution, (float)farResolution),
         Viewport((float)farResolution, 0.0f, (float)resolution, (float)resolution),
     };
-    Array<BoundingBox> lightCasterBounds;
     BoundingBox nearBounds;
     int32 tierCount = 1;
     const auto drawShadowDepth = [&](int32 tier, bool proxies, const uint32* selected, bool indirect)
@@ -400,7 +560,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         {
             if ((bounds[i].UseProxy != 0) != proxies || (selected && (selected[i] & tierBit) == 0))
                 continue;
-            if (tier == 1)
+            if (tier == 1 || useConfiguredCascades)
             {
                 const auto& box = lightCasterBounds[i];
                 if (box.Maximum.X < nearBounds.Minimum.X || box.Minimum.X > nearBounds.Maximum.X ||
@@ -489,25 +649,8 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         lightContext.List = nullptr;
     };
 
-    if (lightDepth)
+    if (lightDepth && !useConfiguredCascades)
     {
-        Matrix lightView;
-        const Float3 direction(LightDirection);
-        const Float3 up = Math::Abs(direction.Y) > 0.99f ? Float3::Right : Float3::Up;
-        Matrix::LookAt(Float3::Zero, direction, up, lightView);
-
-        BoundingBox lightBounds;
-        lightCasterBounds.EnsureCapacity(count);
-        for (int32 i = 0; i < count; i++)
-        {
-            const BoundingBox box(Vector3(bounds[i].Minimum), Vector3(bounds[i].Maximum));
-            const BoundingBox transformed = BoundingBox::Transform(box, lightView);
-            lightCasterBounds.Add(transformed);
-            if (i == 0)
-                lightBounds = transformed;
-            else
-                BoundingBox::Merge(lightBounds, transformed, lightBounds);
-        }
         const Float3 minimum = Float3(lightBounds.Minimum) - Float3::One;
         const Float3 maximum = Float3(lightBounds.Maximum) + Float3::One;
         lightDepthRange = maximum.Z - minimum.Z;
@@ -520,53 +663,49 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         data.CameraForward = Float4(cameraForward, 0.0f);
         if (useTiers)
         {
-            Matrix inverseProjection, inverseView, cameraToLight;
+            Matrix inverseProjection;
             Matrix::Invert(view->Projection, inverseProjection);
-            Matrix::Invert(view->View, inverseView);
-            Matrix::Multiply(inverseView, lightView, cameraToLight);
-            Float3 corners[8];
+            const float centerDepth = nearShadowDistance * 0.5f;
+            const Float3 sliceCenter(0, 0, centerDepth);
+            float radiusSquared = 0.0f;
             for (int32 i = 0; i < 4; i++)
             {
                 const Float3 clip(i & 1 ? 1.0f : -1.0f, i & 2 ? 1.0f : -1.0f, GPU_DEPTH_RANGE_MIN);
                 Float3 point;
                 Float3::TransformCoordinate(clip, inverseProjection, point);
-                Float3::TransformCoordinate(point, cameraToLight, corners[i]);
+                radiusSquared = Math::Max(radiusSquared, (point - sliceCenter).LengthSquared());
                 const float splitDepth = Math::Max(nearShadowDistance, point.Z + 1.0f);
                 if (view->Projection.M34 != 0.0f)
                     point *= splitDepth / point.Z;
                 else
                     point.Z = splitDepth;
-                Float3::TransformCoordinate(point, cameraToLight, corners[i + 4]);
+                radiusSquared = Math::Max(radiusSquared, (point - sliceCenter).LengthSquared());
             }
-            Float3 nearMin = corners[0];
-            Float3 nearMax = corners[0];
-            for (const auto& corner : corners)
+            // A sphere around the slice keeps its scale fixed under rotation.
+            // Snap its light-space translation to the same texel grid.
+            Float3 lightCenter;
+            Float3::TransformCoordinate(cameraPosition + cameraForward * centerDepth, lightView, lightCenter);
+            const float diameter = 2.0f * Math::Sqrt(radiusSquared);
+            const float padding = Math::Max(diameter * ((filterRadius + 2.0f) / resolution), 1.0f);
+            const Float2 sceneMin(minimum);
+            const Float2 sceneMax(maximum);
+            const Float2 center(lightCenter);
+            const Float2 radius(diameter * 0.5f + padding);
+            if (center.X + radius.X > sceneMin.X && center.X - radius.X < sceneMax.X &&
+                center.Y + radius.Y > sceneMin.Y && center.Y - radius.Y < sceneMax.Y)
             {
-                nearMin = Float3::Min(nearMin, corner);
-                nearMax = Float3::Max(nearMax, corner);
-            }
-            // Leave room for filtering and for snapping the center to whole texels.
-            const Float2 span(nearMax.X - nearMin.X, nearMax.Y - nearMin.Y);
-            const Float2 padding = Float2::Max(span * ((filterRadius + 2.0f) / resolution), Float2::One);
-            nearMin -= Float3(padding.X, padding.Y, 0);
-            nearMax += Float3(padding.X, padding.Y, 0);
-            nearMin = Float3::Max(nearMin, minimum);
-            nearMax = Float3::Min(nearMax, maximum);
-            if (nearMax.X > nearMin.X && nearMax.Y > nearMin.Y)
-            {
-                const Float2 texel((nearMax.X - nearMin.X) / resolution, (nearMax.Y - nearMin.Y) / resolution);
-                const Float2 center((nearMax.X + nearMin.X) * 0.5f, (nearMax.Y + nearMin.Y) * 0.5f);
-                const Float2 offset = Float2(Math::Round(center.X / texel.X), Math::Round(center.Y / texel.Y)) * texel - center;
-                nearMin += Float3(offset.X, offset.Y, 0);
-                nearMax += Float3(offset.X, offset.Y, 0);
-                nearMin.Z = minimum.Z;
-                nearMax.Z = maximum.Z;
-                nearBounds = BoundingBox(Vector3(nearMin), Vector3(nearMax));
+                const Float2 span = Float2::Min(radius * 2.0f, sceneMax - sceneMin);
+                const Float2 texel = span / (float)resolution;
+                const Float2 start = center - span * 0.5f - sceneMin;
+                const Float2 snapped = Float2::Clamp(sceneMin + Float2::Round(start / texel) * texel, sceneMin, sceneMax - span);
+                const Float2 end = snapped + span;
+                nearBounds = BoundingBox(Vector3(snapped.X, snapped.Y, minimum.Z), Vector3(end.X, end.Y, maximum.Z));
                 tierCount = 2;
                 data.ShadowSplit = Float4(nearShadowDistance * 0.85f, nearShadowDistance, 1.0f, 0.0f);
             }
         }
 
+        data.ShadowSplit.W = GetShadowDepthPrecisionBias(lightDepth->Format());
         data.HasLightDepth = 1;
         context->ResetRenderTarget();
         context->ResetSR();
@@ -607,7 +746,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     data.HasReceiverNormals = receiverNormals ? 1 : 0;
     data.FilterRadius = filterRadius;
 
-    if (filterRadius > 0 && lightDepth)
+    if ((filterRadius > 0 || maxNormalBias > 0) && lightDepth)
     {
         // Expand only the receiver test. Keep the actual depth geometry and its projection intact.
         const Float3 padding(sweepPadding);
@@ -625,25 +764,277 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     context->ResetSR();
     context->ResetUA();
     context->UpdateBuffer(BoundsBuffer, bounds.Get(), count * sizeof(CasterBounds));
-    context->UpdateCB(constants, &data);
-    context->BindCB(1, constants);
-    context->BindSR(2, depth);
-    context->BindSR(3, BoundsBuffer->View());
-    context->BindSR(7, lightDepth ? lightDepth : depth);
-    context->BindSR(8, receiverNormals ? receiverNormals : depth);
-    context->BindUA(1, SelectionBuffer->View());
+    const auto selectCasters = [&]()
+    {
+        context->UpdateCB(constants, &data);
+        context->BindCB(1, constants);
+        context->BindSR(2, depth);
+        context->BindSR(3, BoundsBuffer->View());
+        context->BindSR(7, lightDepth ? lightDepth : depth);
+        context->BindSR(8, receiverNormals ? receiverNormals : depth);
+        context->BindUA(1, SelectionBuffer->View());
+        if (debugColor)
+            context->BindUA(2, DebugMask->View());
+        {
+            PROFILE_GPU_CPU_NAMED("V2 Shadow Receiver Selection");
+            context->Dispatch(shader, data.GroupsPerRow, Math::DivideAndRoundUp(data.CasterCount, data.GroupsPerRow));
+        }
+        context->ResetUA();
+        context->ResetSR();
+    };
     if (debugColor)
     {
         const uint32 clear[4] = {};
         context->ClearUA(DebugMask, clear);
-        context->BindUA(2, DebugMask->View());
     }
+
+    if (!useConfiguredCascades)
+        selectCasters();
+
+    const auto drawSelectedDepth = [&](int32 tiers)
     {
-        PROFILE_GPU_CPU_NAMED("V2 Shadow Receiver Selection");
-        context->Dispatch(shader, data.GroupsPerRow, Math::DivideAndRoundUp(data.CasterCount, data.GroupsPerRow));
+        Array<uint32> selected;
+        const bool indirect = indirectShadowDraws && device->Limits.HasDrawIndirect;
+        if (!indirect && device->GetRendererType() == RendererType::DirectX11)
+        {
+            if (!SelectionReadback)
+                SelectionReadback = device->CreateBuffer(TEXT("V2 Shadow Selection Readback"));
+            const auto bytes = (uint32)(count * sizeof(uint32));
+            if (SelectionReadback && (SelectionReadback->GetSize() >= bytes ||
+                !SelectionReadback->Init(SelectionBuffer->GetDescription().ToStagingReadback())))
+            {
+                PROFILE_CPU_NAMED("V2 Shadow Selection Readback");
+                context->CopyBuffer(SelectionReadback, SelectionBuffer, bytes);
+                if (const auto* flags = static_cast<const uint32*>(SelectionReadback->Map(GPUResourceMapMode::Read)))
+                {
+                    selected.Add(flags, count);
+                    SelectionReadback->Unmap();
+                }
+            }
+        }
+
+        const bool haveSelection = selected.Count() == count;
+        LastUsedSelection |= haveSelection;
+        if (haveSelection && !useConfiguredCascades)
+        {
+            for (int32 i = 0; i < count; i++)
+                if (bounds[i].UseProxy && selected[i] == 0)
+                    LastRejectedProxyCount++;
+        }
+        for (int32 tier = 0; tier < tiers; tier++)
+            drawShadowDepth(tier, true, haveSelection ? selected.Get() : nullptr, indirect);
+    };
+
+    auto* resolveConstants = SelectionShader->GPU->GetCB(3);
+    const bool haveResolveConstants = resolveConstants && resolveConstants->GetSize() == sizeof(ResolveConstants);
+    ResolveConstants resolve = {};
+    resolve.InverseViewProjection = data.InverseViewProjection;
+    resolve.LightViewProjection = data.LightViewProjection;
+    resolve.DirectionToLight = data.DirectionToLight;
+    resolve.AmbientIntensity = AmbientIntensity;
+    resolve.CameraPosition = Float3(view->LocalTransform.Translation);
+    resolve.IsOrthographic = view->Projection.M34 == 0.0f;
+    resolve.CameraForward = Float3(Vector3::Transform(Vector3::Forward, view->LocalTransform.Orientation));
+    resolve.LightRadiance = Float4(LightColor.R, LightColor.G, LightColor.B, LightIntensity);
+    resolve.ShadowFilter = Float4(lightDepthRange,
+        Math::Abs(view->Projection.M22) * 0.5f * depth->Height(),
+        Math::Tan(Math::Clamp(angularRadius, 0.0f, 45.0f) * DegreesToRadians), filterRadius);
+    resolve.NearLightViewProjection = data.NearLightViewProjection;
+    resolve.ShadowTiles[0] = data.ShadowTiles[0];
+    resolve.ShadowTiles[1] = data.ShadowTiles[1];
+    resolve.ShadowSplit = data.ShadowSplit;
+
+    const auto preparePass = [&](GPUPipelineState*& state, GPUTexture*& target, const char* entry,
+                                 const Char* name, PixelFormat format, bool blend = false)
+    {
+        auto* pixelShader = SelectionShader->GPU->GetPS(entry);
+        if (!pixelShader)
+            return false;
+        if (!state)
+            state = device->CreatePipelineState();
+        if (!target)
+            target = device->CreateTexture(name);
+        if (!state || !target)
+            return false;
+        if (!state->IsValid())
+        {
+            auto desc = GPUPipelineState::Description::DefaultFullscreenTriangle;
+            desc.PS = pixelShader;
+            if (blend)
+                desc.BlendMode = BlendingMode::AlphaBlend;
+            if (state->Init(desc))
+                return false;
+        }
+        return (target->Width() == depth->Width() && target->Height() == depth->Height() && target->GetMemoryUsage()) ||
+            !target->Init(GPUTextureDescription::New2D(depth->Width(), depth->Height(), format,
+                GPUTextureFlags::ShaderResource | GPUTextureFlags::RenderTarget));
+    };
+
+    const bool showCascadeDebug = useConfiguredCascades && settings->ShowShadowCascades && !ShowReceiverHits;
+    bool cascadeDebugReady = false;
+    bool needsScreenFilter = false;
+    GPUTexture* visibilityTexture = nullptr;
+    GPUTexture* publishedDepth = useConfiguredCascades ? nullptr : lightDepth;
+    if (useConfiguredCascades)
+    {
+        // Clear visibility to fully lit. Draw far to near so each map can fade into the one behind it.
+        resolve.CascadeRange.W = 1.0f;
+        const bool drawMask = !ShowReceiverHits && sceneColor && receiverNormals && haveResolveConstants &&
+            (showCascadeDebug ?
+                preparePass(CascadeDebugState, CascadeDebug, "PS_V2CascadeShadowMask", TEXT("V2 Cascade Debug"), PixelFormat::R8G8B8A8_UNorm, true) :
+                preparePass(CascadeMaskState, ShadowMask, "PS_V2CascadeShadowMask", TEXT("V2 Shadow Mask"), PixelFormat::R16G16_Float, true));
+        if (drawMask)
+        {
+            if (showCascadeDebug)
+            {
+                context->Clear(CascadeDebug->View(), Color(0.08f, 0.08f, 0.08f, 1.0f));
+                cascadeDebugReady = true;
+            }
+            else
+            {
+                context->Clear(ShadowMask->View(), Color(1.0f, 0.5f, 0.0f, 0.0f));
+                visibilityTexture = ShadowMask;
+            }
+        }
+
+        if (drawMask || debugColor)
+        {
+            struct CascadeSlice
+            {
+                GPUTexture* Depth;
+                BoundingBox Bounds;
+                Float4 Range;
+                Float3 Parameters; // Depth bias, normal bias, original array index.
+                CascadeFilter Filter;
+            };
+            Array<CascadeSlice, InlinedAllocation<8>> slices;
+            Matrix inverseProjection;
+            Matrix::Invert(view->Projection, inverseProjection);
+            Float3 lightCamera;
+            Float3::TransformCoordinate(resolve.CameraPosition, lightView, lightCamera);
+            const Float3 sceneRadius = Float3::Max(
+                Float3::Abs(Float3(lightBounds.Minimum) - lightCamera),
+                Float3::Abs(Float3(lightBounds.Maximum) - lightCamera));
+            float visibleFar = sceneRadius.Length() + 1.0f;
+
+            // A finite far plane is a rectangle. Its corner radius includes the
+            // screen edges without making shell boundaries depend on camera orientation.
+            float cameraRadius = 0.0f;
+            bool finiteFar = true;
+            for (int32 corner = 0; corner < 4; corner++)
+            {
+                Float3 point;
+                Float3::TransformCoordinate(Float3(corner & 1 ? 1.0f : -1.0f,
+                    corner & 2 ? 1.0f : -1.0f, GPU_DEPTH_RANGE_MAX), inverseProjection, point);
+                const float radius = point.Length();
+                finiteFar &= radius > 0.0f && radius < MAX_float;
+                cameraRadius = Math::Max(cameraRadius, radius);
+            }
+            if (finiteFar)
+                visibleFar = Math::Min(visibleFar, cameraRadius);
+
+            int32 lastCascade = ShadowCascadeMaps.Count() - 1;
+            while (lastCascade >= 0 && !ShadowCascadeMaps[lastCascade].Depth)
+                lastCascade--;
+            float previousEnd = 0.0f;
+            float previousFade = previousEnd;
+            for (int32 i = 0; i < ShadowCascadeMaps.Count(); i++)
+            {
+                const auto& map = ShadowCascadeMaps[i];
+                const bool terminal = i == lastCascade;
+                const float end = terminal ? visibleFar : settings->ShadowCascades[i].EndDistance;
+                const float rangeStart = terminal ? previousFade : previousEnd;
+                if (!map.Depth || !(end > rangeStart && end <= MAX_float))
+                    continue;
+                const float fitEnd = Math::Min(end, visibleFar);
+                if (fitEnd <= previousFade)
+                    break;
+
+                CascadeSlice slice;
+                const float blend = terminal ? 0.0f : Math::Clamp(settings->ShadowCascades[i].BlendFraction, 0.0f, 1.0f);
+                const float fade = terminal ? end : Math::Lerp(previousEnd, end, 1.0f - blend);
+                if (FitShadowSphere(resolve.CameraPosition, lightView, lightBounds,
+                    fitEnd, filterRadius + maxNormalBias, map.Depth->Width(), slice.Bounds))
+                {
+                    slice.Depth = map.Depth;
+                    slice.Range = Float4(previousFade, fade, end, 0.0f);
+                    slice.Parameters = Float3(
+                        Math::Clamp(settings->ShadowCascades[i].DepthBias, 0.0f, 10.0f),
+                        Math::Clamp(settings->ShadowCascades[i].NormalBias, 0.0f, 10.0f), (float)i);
+                    slice.Filter = cascadeFilters[i];
+                    slices.Add(slice);
+                    previousEnd = end;
+                    previousFade = fade;
+                }
+            }
+
+            data.CameraPosition = Float4(resolve.CameraPosition, 0.0f);
+            data.CameraForward = Float4(resolve.CameraForward, 0.0f);
+            data.HasLightDepth = 1;
+            for (int32 i = slices.Count() - 1; i >= 0; i--)
+            {
+                PROFILE_GPU_CPU_NAMED("V2 Shadow Cascade");
+                const auto& slice = slices[i];
+                lightDepth = slice.Depth;
+                publishedDepth = lightDepth;
+                nearBounds = slice.Bounds;
+                const Float3 minimum(nearBounds.Minimum);
+                const Float3 maximum(nearBounds.Maximum);
+                Matrix lightProjection;
+                Matrix::OrthoOffCenter(minimum.X, maximum.X, minimum.Y, maximum.Y, minimum.Z, maximum.Z, lightProjection);
+                auto& lightContext = lightContexts[0];
+                const float size = (float)lightDepth->Width();
+                tileViewports[0] = Viewport(0, 0, size, size);
+                lightContext.Buffers = LightDepthBuffers;
+                lightContext.View.Pass = DrawPass::Depth;
+                lightContext.View.Flags = ViewFlags::None;
+                lightContext.View.Direction = direction;
+                lightContext.View.SetUp(lightView, lightProjection);
+                lightContext.View.PrevViewProjection = lightContext.View.ViewProjection();
+                lightContext.View.Near = minimum.Z;
+                lightContext.View.Far = maximum.Z;
+                lightContext.View.PrepareCache(lightContext, size, size, Float2::Zero);
+
+                Matrix::Transpose(lightContext.View.ViewProjection(), data.LightViewProjection);
+                data.ShadowTiles[0] = Float4(0, 0, size, size);
+                const float worldTexel = Math::Max(maximum.X - minimum.X, maximum.Y - minimum.Y) / size;
+                data.ShadowSplit.W = GetShadowDepthPrecisionBias(lightDepth->Format()) +
+                    slice.Parameters.X * worldTexel / (maximum.Z - minimum.Z);
+                data.CameraPosition.W = slice.Parameters.Y * worldTexel;
+                data.ReceiverRange = Float4(slice.Range.X, slice.Range.Z, 0.0f, 0.0f);
+                data.FilterRadius = slice.Filter.AdaptiveRadius;
+                context->ClearDepth(lightDepth->View());
+                drawShadowDepth(0, false, nullptr, false);
+                selectCasters();
+                if (!drawMask)
+                    continue;
+
+                drawSelectedDepth(1);
+                ResolveConstants cascadeResolve = resolve;
+                cascadeResolve.LightViewProjection = data.LightViewProjection;
+                cascadeResolve.ShadowTiles[0] = data.ShadowTiles[0];
+                cascadeResolve.ShadowSplit = data.ShadowSplit;
+                cascadeResolve.ShadowFilter.X = maximum.Z - minimum.Z;
+                cascadeResolve.ShadowFilter.Z = slice.Filter.AngularTangent;
+                cascadeResolve.ShadowFilter.W = slice.Filter.AdaptiveRadius;
+                needsScreenFilter |= slice.Filter.ScreenRadius > 0.5f;
+                cascadeResolve.CascadeRange = slice.Range;
+                cascadeResolve.CascadeParameters = Float4(data.CameraPosition.W, slice.Parameters.Z,
+                    showCascadeDebug ? 1.0f : 0.0f, slice.Filter.ScreenRadius);
+                context->UpdateCB(resolveConstants, &cascadeResolve);
+                context->BindCB(3, resolveConstants);
+                context->BindSR(2, depth);
+                context->BindSR(7, lightDepth);
+                context->BindSR(8, receiverNormals);
+                context->SetViewportAndScissors((float)depth->Width(), (float)depth->Height());
+                context->SetRenderTarget(showCascadeDebug ? CascadeDebug->View() : ShadowMask->View());
+                context->SetState(showCascadeDebug ? CascadeDebugState : CascadeMaskState);
+                context->DrawFullscreenTriangle();
+                context->ResetRenderTarget();
+                context->ResetSR();
+            }
+        }
     }
-    context->ResetUA();
-    context->ResetSR();
 
     if (debugColor)
     {
@@ -657,46 +1048,16 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         resources.SetOutput(TEXT("Shadow.ReceiverHits"), DebugMask);
     }
 
-    if (!ShowReceiverHits && sceneColor && lightDepth)
+    if (!ShowReceiverHits && !showCascadeDebug && sceneColor && lightDepth)
     {
-        Array<uint32> selected;
-        const bool indirect = indirectShadowDraws && device->Limits.HasDrawIndirect;
-        if (!indirect && device->GetRendererType() == RendererType::DirectX11)
-        {
-            if (!SelectionReadback)
-                SelectionReadback = device->CreateBuffer(TEXT("V2 Shadow Selection Readback"));
-            const auto bytes = (uint32)count * sizeof(uint32);
-            if (SelectionReadback && (SelectionReadback->GetSize() >= bytes ||
-                !SelectionReadback->Init(SelectionBuffer->GetDescription().ToStagingReadback())))
-            {
-                PROFILE_CPU_NAMED("V2 Shadow Selection Readback");
-                context->CopyBuffer(SelectionReadback, SelectionBuffer, (uint32)bytes);
-                if (const auto* flags = static_cast<const uint32*>(SelectionReadback->Map(GPUResourceMapMode::Read)))
-                {
-                    selected.Add(flags, count);
-                    SelectionReadback->Unmap();
-                }
-            }
-        }
-
-        // Explicit APIs need a GPU-driven draw path or a synchronized readback.
-        // Draw all expensive casters when a same-frame CPU result is unavailable.
-        LastUsedSelection = selected.Count() == count;
-        if (LastUsedSelection)
-        {
-            for (int32 i = 0; i < count; i++)
-                if (bounds[i].UseProxy && selected[i] == 0)
-                    LastRejectedProxyCount++;
-        }
-        for (int32 tier = 0; tier < tierCount; tier++)
-            drawShadowDepth(tier, true, selected.Count() == count ? selected.Get() : nullptr, indirect);
+        if (!useConfiguredCascades)
+            drawSelectedDepth(tierCount);
 
         auto* baseColor = resources.Get<GPUTexture>(TEXT("Scene.BaseColor"));
         auto* material = resources.Get<GPUTexture>(TEXT("Scene.Material"));
         auto* emissive = resources.Get<GPUTexture>(TEXT("Scene.Emissive"));
         auto* pixelShader = SelectionShader->GPU->GetPS("PS_V2DirectionalLighting");
-        auto* resolveConstants = SelectionShader->GPU->GetCB(3);
-        if (baseColor && receiverNormals && material && emissive && pixelShader && resolveConstants && resolveConstants->GetSize() == sizeof(ResolveConstants))
+        if (baseColor && receiverNormals && material && emissive && pixelShader && haveResolveConstants)
         {
             if (!ResolveState)
                 ResolveState = device->CreatePipelineState();
@@ -709,106 +1070,85 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
             }
             if (ResolveState && ResolveState->IsValid())
             {
-                ResolveConstants resolve = {};
-                resolve.InverseViewProjection = data.InverseViewProjection;
-                resolve.LightViewProjection = data.LightViewProjection;
-                resolve.DirectionToLight = data.DirectionToLight;
-                resolve.AmbientIntensity = AmbientIntensity;
-                resolve.CameraPosition = Float3(view->LocalTransform.Translation);
-                resolve.IsOrthographic = view->Projection.M34 == 0.0f;
-                resolve.CameraForward = Float3(Vector3::Transform(Vector3::Forward, view->LocalTransform.Orientation));
-                resolve.LightRadiance = Float4(LightColor.R, LightColor.G, LightColor.B, LightIntensity);
-                resolve.ShadowFilter = Float4(lightDepthRange,
-                    Math::Abs(view->Projection.M22) * 0.5f * depth->Height(),
-                    Math::Tan(Math::Clamp(angularRadius, 0.0f, 45.0f) * DegreesToRadians), filterRadius);
-                resolve.NearLightViewProjection = data.NearLightViewProjection;
-                resolve.ShadowTiles[0] = data.ShadowTiles[0];
-                resolve.ShadowTiles[1] = data.ShadowTiles[1];
-                resolve.ShadowSplit = data.ShadowSplit;
-
-                if (filterRadius == 0 && screenSpaceFilter)
+                const bool applyScreenFilter = useConfiguredCascades ? needsScreenFilter : filterRadius == 0 && screenSpaceFilter;
+                if (applyScreenFilter &&
+                    (useConfiguredCascades ? visibilityTexture != nullptr :
+                        preparePass(ShadowMaskState, ShadowMask, "PS_V2ShadowMask", TEXT("V2 Shadow Mask"), PixelFormat::R16G16_Float)) &&
+                    preparePass(ShadowFilterState, FilteredShadowMask, "PS_V2ShadowFilter", TEXT("V2 Filtered Shadow Mask"), PixelFormat::R8_UNorm))
                 {
-                    const auto preparePass = [&](GPUPipelineState*& state, GPUTexture*& target, const char* entry, const Char* name, PixelFormat format)
+                    context->UpdateCB(resolveConstants, &resolve);
+                    context->BindCB(3, resolveConstants);
+                    context->BindSR(2, depth);
+                    context->BindSR(8, receiverNormals);
+                    context->SetViewportAndScissors((float)depth->Width(), (float)depth->Height());
+                    if (!useConfiguredCascades)
                     {
-                        auto* shader = SelectionShader->GPU->GetPS(entry);
-                        if (!shader)
-                            return false;
-                        if (!state)
-                            state = device->CreatePipelineState();
-                        if (!target)
-                            target = device->CreateTexture(name);
-                        if (!state || !target)
-                            return false;
-                        if (!state->IsValid())
-                        {
-                            auto desc = GPUPipelineState::Description::DefaultFullscreenTriangle;
-                            desc.PS = shader;
-                            if (state->Init(desc))
-                                return false;
-                        }
-                        return (target->Width() == depth->Width() && target->Height() == depth->Height() && target->GetMemoryUsage()) ||
-                            !target->Init(GPUTextureDescription::New2D(depth->Width(), depth->Height(), format,
-                                GPUTextureFlags::ShaderResource | GPUTextureFlags::RenderTarget));
-                    };
-                    if (preparePass(ShadowMaskState, ShadowMask, "PS_V2ShadowMask", TEXT("V2 Shadow Mask"), PixelFormat::R16G16_Float) &&
-                        preparePass(ShadowFilterState, FilteredShadowMask, "PS_V2ShadowFilter", TEXT("V2 Filtered Shadow Mask"), PixelFormat::R8_UNorm))
-                    {
-                        resolve.UseFilteredShadow = 1;
-                        context->ResetSR();
-                        context->UpdateCB(resolveConstants, &resolve);
-                        context->BindCB(3, resolveConstants);
-                        context->BindSR(2, depth);
+                        PROFILE_GPU_CPU_NAMED("V2 Shadow Mask");
                         context->BindSR(7, lightDepth);
-                        context->BindSR(8, receiverNormals);
-                        context->SetViewportAndScissors((float)depth->Width(), (float)depth->Height());
-                        {
-                            PROFILE_GPU_CPU_NAMED("V2 Shadow Mask");
-                            context->SetRenderTarget(ShadowMask->View());
-                            context->SetState(ShadowMaskState);
-                            context->DrawFullscreenTriangle();
-                            context->ResetRenderTarget();
-                        }
-                        {
-                            PROFILE_GPU_CPU_NAMED("V2 Shadow Filter");
-                            context->BindSR(12, ShadowMask);
-                            context->SetRenderTarget(FilteredShadowMask->View());
-                            context->SetState(ShadowFilterState);
-                            context->DrawFullscreenTriangle();
-                            context->ResetRenderTarget();
-                        }
-                        resources.SetOutput(TEXT("Shadow.Visibility"), FilteredShadowMask);
+                        context->SetRenderTarget(ShadowMask->View());
+                        context->SetState(ShadowMaskState);
+                        context->DrawFullscreenTriangle();
+                        context->ResetRenderTarget();
                     }
+                    {
+                        PROFILE_GPU_CPU_NAMED("V2 Shadow Filter");
+                        context->BindSR(12, ShadowMask);
+                        context->SetRenderTarget(FilteredShadowMask->View());
+                        context->SetState(ShadowFilterState);
+                        context->DrawFullscreenTriangle();
+                        context->ResetRenderTarget();
+                    }
+                    visibilityTexture = FilteredShadowMask;
                 }
 
                 context->ResetSR();
                 context->SetViewportAndScissors((float)sceneColor->Width(), (float)sceneColor->Height());
                 context->SetRenderTarget(sceneColor->View());
-                if (!resolve.UseFilteredShadow)
-                {
-                    context->UpdateCB(resolveConstants, &resolve);
-                    context->BindCB(3, resolveConstants);
-                }
+                resolve.UseFilteredShadow = visibilityTexture != nullptr;
+                context->UpdateCB(resolveConstants, &resolve);
+                context->BindCB(3, resolveConstants);
                 context->BindSR(2, depth);
                 context->BindSR(7, lightDepth);
                 context->BindSR(8, receiverNormals);
                 context->BindSR(9, baseColor);
                 context->BindSR(10, material);
                 context->BindSR(11, emissive);
-                if (resolve.UseFilteredShadow)
-                    context->BindSR(13, FilteredShadowMask);
+                if (visibilityTexture)
+                {
+                    context->BindSR(13, visibilityTexture);
+                    resources.SetOutput(TEXT("Shadow.Visibility"), visibilityTexture);
+                }
                 context->SetState(ResolveState);
                 context->DrawFullscreenTriangle();
                 context->ResetRenderTarget();
                 context->ResetSR();
-                resources.Set(TEXT("Shadow.Depth"), lightDepth);
-                resources.SetOutput(TEXT("Shadow.Depth"), lightDepth);
+                if (publishedDepth)
+                {
+                    resources.Set(TEXT("Shadow.Depth"), publishedDepth);
+                    resources.SetOutput(TEXT("Shadow.Depth"), publishedDepth);
+                }
             }
         }
     }
 
+    if (cascadeDebugReady)
+    {
+        context->ResetRenderTarget();
+        context->ResetSR();
+        context->SetViewportAndScissors((float)sceneColor->Width(), (float)sceneColor->Height());
+        context->Draw(sceneColor, CascadeDebug);
+        context->ResetRenderTarget();
+        context->ResetSR();
+        resources.SetOutput(TEXT("Shadow.CascadeDebug"), CascadeDebug);
+    }
+
     LastCasterCount = count;
-    resources.Set(TEXT("Shadow.CasterSelection"), SelectionBuffer);
-    resources.SetOutput(TEXT("Shadow.CasterSelection"), SelectionBuffer);
+    // Configured cascades reuse this buffer for each individual depth draw.
+    if (!useConfiguredCascades)
+    {
+        resources.Set(TEXT("Shadow.CasterSelection"), SelectionBuffer);
+        resources.SetOutput(TEXT("Shadow.CasterSelection"), SelectionBuffer);
+    }
     return StageResult::Completed;
 }
 
