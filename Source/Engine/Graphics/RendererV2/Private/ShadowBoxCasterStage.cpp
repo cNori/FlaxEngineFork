@@ -26,6 +26,11 @@
 
 namespace
 {
+    struct BlurBandData
+    {
+        Float4 Range;
+        Float4 Settings; // Resolved mode, full-map radius (screen pixels for ScreenSpace), angular tangent, reserved.
+    };
     constexpr int32 MaximumShadowResolution = 16384;
     constexpr int32 FarShadowResolution = 512;
 
@@ -161,6 +166,9 @@ namespace
         Float4 DebugOptions; // X: lighting mode (0 material, 1 white, 2 cel), Y: edge seeds, Z: jump step, W: debug range.
         Float4 CelParameters; // X: band count, Y: receiver SDF enabled, Z: world distance range, W: core fill strength.
         Float4 ShadowSampling; // X: adaptive sampling jitter, Y: SDF side (0 both, 1 inner, 2 outer), Z: seed-only pass, W: world-origin noise phase.
+        Matrix CameraViewProjection; // World -> camera clip for contact shadows.
+        Float4 BlockerParameters; // X: PCSS enabled; other components reserved.
+        Float4 ContactParameters; // World length, thickness, camera fade distance, reserved.
     });
 
 
@@ -202,8 +210,10 @@ ShadowBoxCasterStage::~ShadowBoxCasterStage()
         SelectionShader->Reloading.Unbind<ShadowBoxCasterStage, &ShadowBoxCasterStage::OnShaderReloading>(this);
     SAFE_DELETE_GPU_RESOURCE(CasterBoundsDebugState);
     SAFE_DELETE_GPU_RESOURCE(ResolveState);
+    SAFE_DELETE_GPU_RESOURCE(BlurBandSettings);
     SAFE_DELETE_GPU_RESOURCE(ShadowMaskState);
     SAFE_DELETE_GPU_RESOURCE(CascadeMaskState);
+    SAFE_DELETE_GPU_RESOURCE(PixelCascadeMaskState);
     SAFE_DELETE_GPU_RESOURCE(CascadeDebugState);
     SAFE_DELETE_GPU_RESOURCE(CascadeDebug);
     SAFE_DELETE_GPU_RESOURCE(ShadowFilterState);
@@ -250,6 +260,8 @@ void ShadowBoxCasterStage::OnShaderReloading(Asset* asset)
         ShadowMaskState->ReleaseGPU();
     if (CascadeMaskState)
         CascadeMaskState->ReleaseGPU();
+    if (PixelCascadeMaskState)
+        PixelCascadeMaskState->ReleaseGPU();
     if (CascadeDebugState)
         CascadeDebugState->ReleaseGPU();
     if (ShadowFilterState)
@@ -358,10 +370,11 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     const int32 proxyTriangleThreshold = settings ? settings->ShadowProxyTriangleThreshold : ProxyTriangleThreshold;
     const float nearShadowDistance = settings ? 0.0f : NearShadowDistance;
     const int32 requestedShadowResolution = settings ? settings->ShadowDepthResolution : ShadowMapResolution;
-    const bool adaptiveFilter = settings ? settings->UseAdaptiveShadowFilter : UseAdaptiveShadowFilter;
-    const float adaptiveRadius = settings ? settings->AdaptiveShadowRadius : AdaptiveShadowRadius;
-    const bool screenSpaceFilter = settings ? settings->UseScreenSpaceShadowFilter : UseScreenSpaceShadowFilter;
-    const float angularRadius = settings ? settings->ShadowAngularRadius : ShadowAngularRadius;
+    const bool smoothShadows = !settings || settings->ShadowRendering == ShadowRenderingMode::Smooth;
+    const bool adaptiveFilter = smoothShadows;
+    const float adaptiveRadius = 8.0f;
+    const bool screenSpaceFilter = false;
+    const float angularRadius = 0.27f;
     const bool indirectShadowDraws = settings ? settings->UseIndirectShadowDraws : UseIndirectShadowDraws;
     const bool cascadeDebugRequested = settings && !settings->ShadowCascades.IsEmpty() && settings->ShowShadowCascades;
     const bool showSelectedCasters = !cascadeDebugRequested && (ShowSelectedExpensiveCasters || (settings && settings->ShowSelectedExpensiveShadowCasters));
@@ -459,6 +472,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         float AdaptiveRadius;
         float ScreenRadius;
         float AngularTangent;
+        bool PCSS;
     };
     Array<CascadeFilter, InlinedAllocation<8>> cascadeFilters;
     float maxNormalBias = 0.0f;
@@ -466,21 +480,58 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     {
         for (const auto& cascade : settings->ShadowCascades)
         {
-            const bool inherit = cascade.FilterMode == ShadowCascadeFilterMode::Inherit;
-            const auto mode = inherit ?
-                (inheritedRadius > 0 ? ShadowCascadeFilterMode::Adaptive :
-                    (screenSpaceFilter ? ShadowCascadeFilterMode::ScreenSpace : ShadowCascadeFilterMode::Hard)) :
-                cascade.FilterMode;
-            const float radius = Math::Clamp(cascade.FilterRadius, 0.0f, 32.0f);
             CascadeFilter filter;
-            filter.AdaptiveRadius = mode == ShadowCascadeFilterMode::Adaptive ? (inherit ? inheritedRadius : radius) : 0.0f;
-            filter.ScreenRadius = mode == ShadowCascadeFilterMode::ScreenSpace ? (inherit ? 4.0f : Math::Min(radius, 4.0f)) : 0.0f;
-            const float angle = Math::Clamp(inherit ? angularRadius : cascade.AngularRadius, 0.0f, 45.0f);
-            filter.AngularTangent = Math::Tan(angle * DegreesToRadians);
+            filter.AdaptiveRadius = smoothShadows ? Math::Clamp(cascade.FilterRadius, 0.0f, 32.0f) : 0.0f;
+            filter.ScreenRadius = 0.0f;
+            filter.AngularTangent = Math::Tan(angularRadius * DegreesToRadians);
+            filter.PCSS = false;
             cascadeFilters.Add(filter);
             filterRadius = Math::Max(filterRadius, filter.AdaptiveRadius);
             maxNormalBias = Math::Max(maxNormalBias, Math::Clamp(cascade.NormalBias, 0.0f, 10.0f));
         }
+    }
+    Array<BlurBandData, InlinedAllocation<8>> blurBands;
+    bool blurNeedsScreenFilter = false;
+    if (settings && smoothShadows)
+    {
+        float previousEnd = 0, previousFade = 0;
+        for (int32 i = 0; i < settings->ShadowCascades.Count(); i++)
+        {
+            const auto& band = settings->ShadowCascades[i];
+            const bool terminal = i == settings->ShadowCascades.Count() - 1;
+            const float end = terminal ? MAX_float : (band.BlurEndDistance > 0 ? band.BlurEndDistance : band.EndDistance);
+            if (!(end > previousEnd && end <= MAX_float))
+                continue;
+            const float fade = terminal ? end : Math::Lerp(previousEnd, end, 1.0f - Math::Clamp(band.BlurBlendFraction, 0.0f, 1.0f));
+            const int32 referenceSize = band.TextureSize <= 0 ? resolution : Math::Clamp(band.TextureSize, FarShadowResolution, resolution);
+            const float radius = Math::Clamp(band.FilterRadius, 0.0f, 32.0f) * (float)resolution / referenceSize;
+            blurBands.Add({ Float4(previousFade, fade, end, 0), Float4(2.0f, radius,
+                Math::Tan(angularRadius * DegreesToRadians), 0) });
+            filterRadius = Math::Max(filterRadius, Math::Min(radius, 32.0f));
+            previousEnd = end;
+            previousFade = fade;
+        }
+    }
+    if (blurBands.HasItems())
+    {
+        if (!BlurBandSettings)
+            BlurBandSettings = device->CreateBuffer(TEXT("V2 Independent Blur Bands"));
+        if (!BlurBandSettings || (BlurBandSettings->GetElementsCount() < (uint32)blurBands.Count() &&
+            BlurBandSettings->Init(GPUBufferDescription::Structured(blurBands.Count(), sizeof(BlurBandData)))))
+            return StageResult::Failed;
+        context->ResetSR();
+        context->UpdateBuffer(BlurBandSettings, blurBands.Get(), blurBands.Count() * sizeof(BlurBandData));
+        resources.SetOutput(TEXT("Shadow.BlurBands"), BlurBandSettings);
+    }
+    else
+    {
+        // The shared shader declares t0 even when Pixel bypasses the band lookup.
+        // Keep a valid minimal binding rather than a stale texture/retired buffer view.
+        if (!BlurBandSettings)
+            BlurBandSettings = device->CreateBuffer(TEXT("V2 Shadow Band Binding"));
+        if (!BlurBandSettings || (BlurBandSettings->GetElementsCount() == 0 &&
+            BlurBandSettings->Init(GPUBufferDescription::Structured(1, sizeof(BlurBandData)))))
+            return StageResult::Failed;
     }
     float sweepPadding = 0.0f;
     if (filterRadius > 0 || maxNormalBias > 0)
@@ -1020,7 +1071,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     resolve.LightViewProjection = data.LightViewProjection;
     resolve.DirectionToLight = data.DirectionToLight;
     resolve.AmbientIntensity = AmbientIntensity;
-    resolve.ShadowSampling.X = settings && settings->UseShadowJitter ? 1.0f : 0.0f;
+    resolve.ShadowSampling.X = smoothShadows ? 1.0f : 0.0f;
     resolve.ShadowSampling.Y = settings ? (float)(int32)settings->DistanceFieldSide : 0.0f;
     // Keep jitter attached to world receivers even if WorldWarp changes the local origin.
     if (view->Source)
@@ -1037,6 +1088,11 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     }
     resolve.DebugOptions.X = settings && settings->ShowCelShading ? 2.0f :
         settings && settings->ShowWhiteSurfaceLighting ? 1.0f : 0.0f;
+    resolve.CameraViewProjection = data.ViewProjection;
+    resolve.BlockerParameters = Float4(0.0f, (float)blurBands.Count(), (float)resolution, smoothShadows ? 0.0f : 1.0f);
+    resolve.ContactParameters = Float4(smoothShadows && settings && settings->UseContactShadows ? Math::Clamp(settings->ContactShadowLength, 0.0f, 200.0f) : 0.0f,
+        settings ? Math::Max(settings->ContactShadowThickness, 0.01f) : 1.0f,
+        settings ? Math::Max(settings->ContactShadowFadeDistance, 0.01f) : 2000.0f, 0);
     resolve.CameraPosition = Float3(view->LocalTransform.Translation);
     resolve.IsOrthographic = view->Projection.M34 == 0.0f;
     resolve.CameraForward = Float3(Vector3::Transform(Vector3::Forward, view->LocalTransform.Orientation));
@@ -1076,11 +1132,15 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     };
 
     const bool showCascadeDebug = useConfiguredCascades && cascadeDebugRequested;
+    const bool blurDebugRequested = settings && settings->ShowShadowBlurBands && blurBands.HasItems();
     bool cascadeDebugReady = false;
-    const bool distanceDebugRequested = settings && settings->ShowShadowDistanceField && !showCascadeDebug;
+    const bool blockerDebugRequested = settings && settings->ShowBlockerDistance && !showCascadeDebug && !blurDebugRequested;
+    const bool showCascadeVisualization = showCascadeDebug || (useConfiguredCascades && (blockerDebugRequested || blurDebugRequested));
+    const bool contactDebugRequested = smoothShadows && settings && settings->ShowContactShadows && !showCascadeDebug && !blurDebugRequested && !blockerDebugRequested;
+    const bool distanceDebugRequested = smoothShadows && settings && settings->ShowShadowDistanceField && !showCascadeDebug && !blurDebugRequested && !blockerDebugRequested && !contactDebugRequested;
     bool distanceDebugReady = false;
-    const bool celRequested = settings && settings->ShowCelShading && !showCascadeDebug;
-    bool needsScreenFilter = false;
+    const bool celRequested = settings && settings->ShowCelShading && !showCascadeDebug && !blurDebugRequested && !blockerDebugRequested && !contactDebugRequested;
+    bool needsScreenFilter = blurNeedsScreenFilter;
     GPUTexture* visibilityTexture = nullptr;
     // Shared resolve body; cel invokes it only AFTER the distance field is complete.
     const auto drawLightingResolve = [&](bool cel)
@@ -1094,7 +1154,19 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         context->SetViewportAndScissors((float)sceneColor->Width(), (float)sceneColor->Height());
         context->SetRenderTarget(sceneColor->View());
         resolve.UseFilteredShadow = visibilityTexture != nullptr;
-        resolve.DebugOptions.X = cel ? 2.0f : settings && settings->ShowWhiteSurfaceLighting ? 1.0f : 0.0f;
+        resolve.DebugOptions.X = blurDebugRequested ? 5.0f : blockerDebugRequested ? 3.0f : contactDebugRequested ? 4.0f : cel ? 2.0f : settings && settings->ShowWhiteSurfaceLighting ? 1.0f : 0.0f;
+        if (blockerDebugRequested || blurDebugRequested)
+        {
+            // The final resolve samples the full geometry depth, never a reduced band.
+            // Configured bands rebuild this projection after the initial resolve setup.
+            resolve.LightViewProjection = data.LightViewProjection;
+            resolve.ShadowTiles[0] = data.ShadowTiles[0];
+            resolve.ShadowSplit = Float4(0, 0, 0, GetShadowDepthPrecisionBias(lightDepth->Format()));
+            resolve.ShadowFilter.X = lightContexts[0].View.Far - lightContexts[0].View.Near;
+            resolve.ReductionFootprint = Float4::Zero;
+            resolve.DebugOptions.W = Math::Max(settings->BlockerDistanceDisplayRange, 0.01f);
+
+        }
         resolve.CelParameters = Float4(settings ? (float)Math::Clamp(settings->CelShadingBands, 2, 16) : 2.0f,
             cel && distanceDebugReady ? 1.0f : 0.0f, settings ? settings->ShadowDistanceDisplayRange : 32.0f, settings ? Math::Clamp(settings->ShadowFillStrength, 0.0f, 1.0f) : 0.5f);
         context->UpdateCB(resolveConstants, &resolve);
@@ -1102,6 +1174,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         context->BindSR(2, depth);
         context->BindSR(7, lightDepth);
         context->BindSR(8, receiverNormals);
+        if (BlurBandSettings) context->BindSR(0, BlurBandSettings->View());
         context->BindSR(9, baseColor);
         context->BindSR(10, material);
         context->BindSR(11, emissive);
@@ -1126,14 +1199,14 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         // Clear visibility to fully lit. Draw far to near so each map can fade into the one behind it.
         resolve.CascadeRange.W = 1.0f;
         const bool drawMask = sceneColor && receiverNormals && haveResolveConstants &&
-            (showCascadeDebug ?
+            (showCascadeVisualization ?
                 preparePass(CascadeDebugState, CascadeDebug, "PS_V2CascadeShadowMask", TEXT("V2 Cascade Debug"), PixelFormat::R8G8B8A8_UNorm, true) :
-                preparePass(CascadeMaskState, ShadowMask, "PS_V2CascadeShadowMask", TEXT("V2 Shadow Mask"), PixelFormat::R16G16_Float, true));
+                preparePass(smoothShadows ? CascadeMaskState : PixelCascadeMaskState, ShadowMask, "PS_V2CascadeShadowMask", TEXT("V2 Shadow Mask"), PixelFormat::R16G16_Float, smoothShadows));
         if (drawMask)
         {
-            if (showCascadeDebug)
+            if (showCascadeVisualization)
             {
-                context->Clear(CascadeDebug->View(), Color(0.08f, 0.08f, 0.08f, 1.0f));
+                context->Clear(CascadeDebug->View(), blockerDebugRequested ? Color(0, 0, 0, 1) : Color(0.08f, 0.08f, 0.08f, 1.0f));
                 cascadeDebugReady = true;
             }
             else
@@ -1195,7 +1268,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                     break;
 
                 CascadeSlice slice;
-                const float blend = terminal ? 0.0f : Math::Clamp(settings->ShadowCascades[i].BlendFraction, 0.0f, 1.0f);
+                const float blend = terminal || !smoothShadows ? 0.0f : Math::Clamp(settings->ShadowCascades[i].BlendFraction, 0.0f, 1.0f);
                 const float fade = terminal ? end : Math::Lerp(previousEnd, end, 1.0f - blend);
                 if (FitShadowSphere(resolve.CameraPosition, lightView, lightBounds,
                     fitEnd, filterRadius + maxNormalBias, SharedCascadeDepth->Width(), slice.Bounds))
@@ -1257,7 +1330,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                     drawSelectedDepth(1);
                 }
                 Array<GPUTexture*> usedBandMaps;
-                if (!showCascadeDebug)
+                if (!showCascadeDebug || blurDebugRequested)
                 {
                     PROFILE_GPU_CPU_NAMED("V2 Shadow Depth LODs");
                     // Build larger requested maps first so smaller bands can reuse
@@ -1320,18 +1393,29 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                         cascadeResolve.ShadowFilter.X = maximum.Z - minimum.Z;
                         cascadeResolve.ShadowFilter.Z = slice.Filter.AngularTangent;
                         cascadeResolve.ShadowFilter.W = slice.Filter.AdaptiveRadius;
-                        needsScreenFilter |= slice.Filter.ScreenRadius > 0.5f;
+                        cascadeResolve.BlockerParameters.X = slice.Filter.PCSS ? 1.0f : 0.0f;
+                        if (blurBands.IsEmpty()) needsScreenFilter |= slice.Filter.ScreenRadius > 0.5f;
                         cascadeResolve.CascadeRange = slice.Range;
+                        if (blurDebugRequested)
+                            cascadeResolve.DebugOptions.X = 5.0f;
+                        if (blockerDebugRequested)
+                        {
+                            // Evaluate distance on THIS band's map and composite the
+                            // display with exactly the existing cascade fade weight.
+                            cascadeResolve.DebugOptions.X = 3.0f;
+                            cascadeResolve.DebugOptions.W = Math::Max(settings->BlockerDistanceDisplayRange, 0.01f);
+                        }
                         cascadeResolve.CascadeParameters = Float4(data.CameraPosition.W, slice.Parameters.Z,
-                            showCascadeDebug ? 1.0f : 0.0f, slice.Filter.ScreenRadius);
+                            showCascadeDebug ? (blurDebugRequested ? 2.0f : 1.0f) : 0.0f, slice.Filter.ScreenRadius);
                         context->UpdateCB(resolveConstants, &cascadeResolve);
                         context->BindCB(3, resolveConstants);
                         context->BindSR(2, depth);
                         context->BindSR(7, bandDepth);
                         context->BindSR(8, receiverNormals);
+                        if (BlurBandSettings) context->BindSR(0, BlurBandSettings->View());
                         context->SetViewportAndScissors((float)depth->Width(), (float)depth->Height());
-                        context->SetRenderTarget(showCascadeDebug ? CascadeDebug->View() : ShadowMask->View());
-                        context->SetState(showCascadeDebug ? CascadeDebugState : CascadeMaskState);
+                        context->SetRenderTarget(showCascadeVisualization ? CascadeDebug->View() : ShadowMask->View());
+                        context->SetState(showCascadeVisualization ? CascadeDebugState : smoothShadows ? CascadeMaskState : PixelCascadeMaskState);
                         context->DrawFullscreenTriangle();
                         context->ResetRenderTarget();
                         context->ResetSR();
@@ -1342,7 +1426,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     }
 
 
-    if (!showCascadeDebug && sceneColor && lightDepth)
+    if (!showCascadeVisualization && sceneColor && lightDepth)
     {
         if (!useConfiguredCascades)
             drawSelectedDepth(tierCount);
@@ -1372,7 +1456,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                     preparePass(ShadowDistanceResolveState, ShadowDistanceDebug, "PS_V2ShadowDistanceResolve", TEXT("V2 Shadow Distance Debug"), PixelFormat::R8G8B8A8_UNorm);
                 resolve.DebugOptions.Y = distanceReady ? 1.0f : 0.0f;
                 resolve.DebugOptions.W = settings ? settings->ShadowDistanceDisplayRange : 32.0f;
-                const bool applyScreenFilter = distanceReady || (useConfiguredCascades ? needsScreenFilter : filterRadius == 0 && screenSpaceFilter);
+                const bool applyScreenFilter = distanceReady || (useConfiguredCascades ? needsScreenFilter : blurBands.HasItems() ? blurNeedsScreenFilter : filterRadius == 0 && screenSpaceFilter);
                 if (applyScreenFilter &&
                     (useConfiguredCascades ? visibilityTexture != nullptr :
                         preparePass(ShadowMaskState, ShadowMask, "PS_V2ShadowMask", TEXT("V2 Shadow Mask"), PixelFormat::R16G16_Float)) &&
@@ -1409,6 +1493,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                     if (!useConfiguredCascades)
                     {
                         PROFILE_GPU_CPU_NAMED("V2 Shadow Mask");
+                        if (BlurBandSettings) context->BindSR(0, BlurBandSettings->View());
                         context->BindSR(7, lightDepth);
                         context->SetRenderTarget(ShadowMask->View());
                         context->SetState(ShadowMaskState);
@@ -1553,7 +1638,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         context->Draw(sceneColor, CascadeDebug);
         context->ResetRenderTarget();
         context->ResetSR();
-        resources.SetOutput(TEXT("Shadow.CascadeDebug"), CascadeDebug);
+        resources.SetOutput(blurDebugRequested ? TEXT("Shadow.BlurBandsDebug") : blockerDebugRequested ? TEXT("Shadow.BlockerDistanceDebug") : TEXT("Shadow.CascadeDebug"), CascadeDebug);
         resources.SetOutput(TEXT("Shadow.DebugResource"), CascadeDebug);
     }
 

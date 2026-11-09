@@ -62,6 +62,7 @@ private:
     };
     Array<BandDepthMap> BandDepthMaps;
     GPUPipelineState* DepthReductionState = nullptr;
+    GPUBuffer* BlurBandSettings = nullptr;
     Float2 GetBandDepthFootprint(const GPUTexture* depth) const;
     GPUTexture* GetBandDepth(GPUContext* context, GPUTexture* source, int32 resolution, Array<GPUTexture*>& usedMaps);
     RenderBuffers* LightDepthBuffers = nullptr;
@@ -71,6 +72,7 @@ private:
     GPUPipelineState* ResolveState = nullptr;
     GPUPipelineState* ShadowMaskState = nullptr;
     GPUPipelineState* CascadeMaskState = nullptr;
+    GPUPipelineState* PixelCascadeMaskState = nullptr;
     GPUPipelineState* CascadeDebugState = nullptr;
     GPUTexture* CascadeDebug = nullptr;
     GPUPipelineState* ShadowFilterState = nullptr;
@@ -110,17 +112,9 @@ public:
     /// <summary>Gets the shared shadow-depth size, or the legacy atlas near-tile size.</summary>
     API_PROPERTY() int32 GetAllocatedShadowMapResolution() const;
 
-    /// <summary>Uses adaptive light-space sampling before falling back to the other filter modes.</summary>
-    API_FIELD() bool UseAdaptiveShadowFilter = true;
 
-    /// <summary>Adaptive filter radius in shadow-map texels.</summary>
-    API_FIELD() float AdaptiveShadowRadius = 2.5f;
 
-    /// <summary>Softens the directional shadow mask before applying lighting.</summary>
-    API_FIELD() bool UseScreenSpaceShadowFilter = true;
 
-    /// <summary>Directional light angular radius in degrees for contact-hardening shadows.</summary>
-    API_FIELD() float ShadowAngularRadius = 0.27f;
 
     /// <summary>Linear color and strength of the directional light used by the preview.</summary>
     API_FIELD() Color LightColor = Color::White;

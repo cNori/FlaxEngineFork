@@ -6,17 +6,13 @@
 #include "Engine/Scripting/ScriptingObject.h"
 #include "Engine/Core/ISerializable.h"
 
-/// <summary>Filtering applied by a directional shadow cascade.</summary>
-API_ENUM() enum class ShadowCascadeFilterMode
+/// <summary>Master shadow rendering mode.</summary>
+API_ENUM() enum class ShadowRenderingMode
 {
-    /// <summary>Uses the pipeline-wide shadow filter settings.</summary>
-    Inherit = 0,
-    /// <summary>Uses the central bilinear depth comparison.</summary>
-    Hard = 1,
-    /// <summary>Uses adaptive jittered PCF sampling in shadow-map space.</summary>
-    Adaptive = 2,
-    /// <summary>Uses a depth-aware screen-space blur.</summary>
-    ScreenSpace = 3,
+    /// <summary>One point depth comparison; no filtering or distance blending.</summary>
+    Pixel = 0,
+    /// <summary>Filtered shadows with cascade and blocker-distance transitions.</summary>
+    Smooth = 1,
 };
 
 /// <summary>
@@ -42,6 +38,18 @@ API_STRUCT() struct FLAXENGINE_API ShadowCascadeSettings : ISerializable
     API_FIELD(Attributes="Limit(0.0f, 1.0f, 0.01f)")
     float BlendFraction = 0.1f;
 
+    /// <summary>Receiver-to-blocker distance along the light ray in centimeters where this entry's filter blends into the next entry's filter. Independent of the map End Distance. Zero uses the numeric map End Distance as the blocker-distance threshold. Ignored on the final entry.</summary>
+    API_FIELD(Attributes="Limit(0), ValueCategory(Utils.ValueCategory.Distance)")
+    float BlurEndDistance = 0.0f;
+
+    /// <summary>Fraction of the blocker-distance interval used to blend evaluated filter results. Independent of the map Blend Fraction.</summary>
+    API_FIELD(Attributes="Limit(0.0f, 1.0f, 0.01f)")
+    float BlurBlendFraction = 0.1f;
+
+    /// <summary>Direct Smooth blur radius in this entry's Texture Size texels. Larger values soften this camera-distance band and the corresponding blocker-distance band. Pixel ignores it. Zero disables filtering for this entry.</summary>
+    API_FIELD(Attributes="EditorDisplay(null, \"Filter Size\"), Limit(0.0f, 32.0f, 0.1f)")
+    float FilterRadius = 2.5f;
+
     /// <summary>Extra depth comparison bias in shadow-map texels, added to the automatic precision correction.</summary>
     API_FIELD(Attributes="Limit(0.0f, 10.0f, 0.01f)")
     float DepthBias = 0.0f;
@@ -50,17 +58,8 @@ API_STRUCT() struct FLAXENGINE_API ShadowCascadeSettings : ISerializable
     API_FIELD(Attributes="Limit(0.0f, 10.0f, 0.01f)")
     float NormalBias = 0.0f;
 
-    /// <summary>Shadow filter used by this band. Inherit uses the pipeline-wide settings.</summary>
-    API_FIELD()
-    ShadowCascadeFilterMode FilterMode = ShadowCascadeFilterMode::Inherit;
 
-    /// <summary>Filter radius in shadow-map texels for Adaptive (0 to 32), or maximum blur radius in screen pixels for ScreenSpace (clamped to 4).</summary>
-    API_FIELD(Attributes="Limit(0.0f, 32.0f, 0.1f)")
-    float FilterRadius = 2.5f;
 
-    /// <summary>Light angular radius in degrees for contact softness when Filter Mode is ScreenSpace.</summary>
-    API_FIELD(Attributes="Limit(0.0f, 45.0f, 0.01f)")
-    float AngularRadius = 0.27f;
 };
 
 
@@ -83,29 +82,25 @@ class FLAXENGINE_API RenderPipelineGraphicSettings : public ScriptingObject, pub
     DECLARE_SCRIPTING_TYPE(RenderPipelineGraphicSettings);
     API_AUTO_SERIALIZATION();
 public:
+    /// <summary>Pixel skips shadow filtering, contact correction, distance-field processing and all cascade/blur transition blending. Smooth uses distance-based filtering.</summary>
+    API_FIELD(Attributes="EditorOrder(-10), EditorDisplay(\"Shadows\", \"Rendering\")")
+    ShadowRenderingMode ShadowRendering = ShadowRenderingMode::Smooth;
+
     /// <summary>Square resolution of the one directional-light depth map shared by all bands.</summary>
     API_FIELD(Attributes="EditorOrder(0), EditorDisplay(\"Shadows\", \"Depth Resolution\"), Limit(512, 16384, 512)")
     int32 ShadowDepthResolution = 2048;
 
     /// <summary>Radial shadow bands in increasing end-distance order. The final band covers the remaining view. Empty uses one unbanded map.</summary>
-    API_FIELD(Attributes="EditorOrder(10), EditorDisplay(\"Shadows\", \"Bands\")")
+    API_FIELD(Attributes="EditorOrder(10), EditorDisplay(\"Shadows\", \"Shadow Distance Settings\")")
     Array<ShadowCascadeSettings> ShadowCascades;
 
-    /// <summary>Uses adaptive light-space sampling. Per-band filter overrides take precedence.</summary>
-    API_FIELD(Attributes="EditorOrder(20), EditorDisplay(\"Shadow Filtering\", \"Adaptive Filter\")")
-    bool UseAdaptiveShadowFilter = true;
+    /// <summary>Displays blur bands by receiver-to-blocker distance along the light ray, using the cascade palette. Blue-black means no blocker; magenta means outside light coverage. Enable Shadow Cascades too to overlay white cascade ends and dark cascade blend-start contours.</summary>
+    API_FIELD(Attributes="EditorOrder(131), EditorDisplay(\"Debug\", \"Blur Bands\")")
+    bool ShowShadowBlurBands = false;
 
-    /// <summary>Adaptive sample radius in shadow-map texels.</summary>
-    API_FIELD(Attributes="EditorOrder(30), EditorDisplay(\"Shadow Filtering\", \"Adaptive Radius\"), Limit(0.0f, 32.0f, 0.1f), VisibleIf(nameof(UseAdaptiveShadowFilter))")
-    float AdaptiveShadowRadius = 2.5f;
 
-    /// <summary>Uses the screen-space filter when adaptive filtering is disabled. Per-band overrides take precedence.</summary>
-    API_FIELD(Attributes="EditorOrder(40), EditorDisplay(\"Shadow Filtering\", \"Screen Space Filter\"), VisibleIf(nameof(UseAdaptiveShadowFilter), true)")
-    bool UseScreenSpaceShadowFilter = true;
 
-    /// <summary>Light angular radius in degrees for screen-space contact softness.</summary>
-    API_FIELD(Attributes="EditorOrder(50), EditorDisplay(\"Shadow Filtering\", \"Angular Radius\"), Limit(0.0f, 45.0f, 0.01f), VisibleIf(nameof(UseAdaptiveShadowFilter), true), VisibleIf(nameof(UseScreenSpaceShadowFilter))")
-    float ShadowAngularRadius = 0.27f;
+
 
     /// <summary>Enables camera depth occlusion on DirectX 11.</summary>
     API_FIELD(Attributes="EditorOrder(60), EditorDisplay(\"Occlusion Culling\", \"Enabled\")")
@@ -151,9 +146,14 @@ public:
     API_FIELD(Attributes="EditorOrder(146), EditorDisplay(\"Debug\", \"Cel Bands\"), Limit(2, 16), VisibleIf(nameof(ShowCelShading))")
     int32 CelShadingBands = 2;
 
-    /// <summary>Enables the randomized adaptive shadow sampling pattern for comparison. Off uses fixed filter taps. The SDF measures the fully shadowed core of the completed filtered result.</summary>
-    API_FIELD(Attributes="EditorOrder(147), EditorDisplay(\"Debug\", \"Shadow Jitter\")")
-    bool UseShadowJitter = true;
+
+    /// <summary>Displays receiver-to-blocker distance along the directional-light ray in centimeters. With cascades, evaluates each configured band map and blends its distance display using the existing radial ranges and Blend Fraction. Without cascades, uses the full light map. Black is contact, white reaches the display range, blue has no blocking sample, magenta is outside light coverage. Averages blocker depths over the local shadow-map search; does not include contact visibility or recover hidden depth layers.</summary>
+    API_FIELD(Attributes="EditorOrder(148), EditorDisplay(\"Debug\", \"Blocker Distance\")")
+    bool ShowBlockerDistance = false;
+
+    /// <summary>Receiver-to-blocker distance mapped to white. Changes only the display, not the measured distance or shadows.</summary>
+    API_FIELD(Attributes="EditorOrder(149), EditorDisplay(\"Debug\", \"Blocker Display Range\"), Limit(0.01f), ValueCategory(Utils.ValueCategory.Distance), VisibleIf(nameof(ShowBlockerDistance))")
+    float BlockerDistanceDisplayRange = 100.0f;
 
     /// <summary>Displays approximate receiver-surface distance to the fully shadowed core edge. Combines camera depth and light depth; negative inside, positive outside, in world centimeters. Only visible receiver surfaces are available. Debug only; does not modify lighting. Cascade debug takes priority.</summary>
     API_FIELD(Attributes="EditorOrder(150), EditorDisplay(\"Debug\", \"Shadow Distance Field\")")
@@ -170,5 +170,26 @@ public:
     /// <summary>Cel preview fill at the jitter-to-core handoff. Zero keeps the original shadow. Higher values lift the handoff; the SDF fades this fill inward to the original shadow core over the distance range. The jitter curve keeps its shape and shares the handoff height.</summary>
     API_FIELD(Attributes="EditorOrder(162), EditorDisplay(\"Debug\", \"Shadow Fill Strength\"), Limit(0.0f, 1.0f, 0.01f), VisibleIf(nameof(ShowShadowDistanceField))")
     float ShadowFillStrength = 0.5f;
+
+
+    /// <summary>Combines short camera-depth contact visibility with mapped shadows using minimum visibility. Camera-hidden and off-screen geometry remains covered only by the shadow map.</summary>
+    API_FIELD(Attributes="EditorOrder(51), EditorDisplay(\"Contact Shadows\", \"Enabled\")")
+    bool UseContactShadows = true;
+
+    /// <summary>Maximum contact ray length in world centimeters. This is a visibility correction, not a blocker-distance replacement.</summary>
+    API_FIELD(Attributes="EditorOrder(52), EditorDisplay(\"Contact Shadows\", \"Length\"), Limit(0.0f, 200.0f, 0.1f), ValueCategory(Utils.ValueCategory.Distance), VisibleIf(nameof(UseContactShadows))")
+    float ContactShadowLength = 50.0f;
+
+    /// <summary>Camera-depth thickness accepted by the contact trace, in centimeters. Larger values tolerate coarse depth but may darken around silhouettes.</summary>
+    API_FIELD(Attributes="EditorOrder(53), EditorDisplay(\"Contact Shadows\", \"Thickness\"), Limit(0.01f), ValueCategory(Utils.ValueCategory.Distance), VisibleIf(nameof(UseContactShadows))")
+    float ContactShadowThickness = 1.0f;
+
+    /// <summary>Camera distance where contact shadows finish fading out. The regular shadow map is unaffected.</summary>
+    API_FIELD(Attributes="EditorOrder(54), EditorDisplay(\"Contact Shadows\", \"Fade Distance\"), Limit(0.01f), ValueCategory(Utils.ValueCategory.Distance), VisibleIf(nameof(UseContactShadows))")
+    float ContactShadowFadeDistance = 2000.0f;
+
+    /// <summary>Displays contact visibility alone: white is unblocked, black is contact shadow. Cascade and blocker-distance debug take priority.</summary>
+    API_FIELD(Attributes="EditorOrder(149), EditorDisplay(\"Debug\", \"Contact Shadows\")")
+    bool ShowContactShadows = false;
 
 };
