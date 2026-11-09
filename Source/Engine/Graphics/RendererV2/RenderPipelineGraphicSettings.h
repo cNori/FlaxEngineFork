@@ -54,8 +54,8 @@ API_STRUCT() struct FLAXENGINE_API ShadowCascadeSettings : ISerializable
     API_FIELD()
     ShadowCascadeFilterMode FilterMode = ShadowCascadeFilterMode::Inherit;
 
-    /// <summary>Filter radius in shadow-map texels for Adaptive, or maximum blur radius in screen pixels for ScreenSpace.</summary>
-    API_FIELD(Attributes="Limit(0.0f, 4.0f, 0.1f)")
+    /// <summary>Filter radius in shadow-map texels for Adaptive (0 to 32), or maximum blur radius in screen pixels for ScreenSpace (clamped to 4).</summary>
+    API_FIELD(Attributes="Limit(0.0f, 32.0f, 0.1f)")
     float FilterRadius = 2.5f;
 
     /// <summary>Light angular radius in degrees for contact softness when Filter Mode is ScreenSpace.</summary>
@@ -96,7 +96,7 @@ public:
     bool UseAdaptiveShadowFilter = true;
 
     /// <summary>Adaptive sample radius in shadow-map texels.</summary>
-    API_FIELD(Attributes="EditorOrder(30), EditorDisplay(\"Shadow Filtering\", \"Adaptive Radius\"), Limit(0.0f, 4.0f, 0.1f), VisibleIf(nameof(UseAdaptiveShadowFilter))")
+    API_FIELD(Attributes="EditorOrder(30), EditorDisplay(\"Shadow Filtering\", \"Adaptive Radius\"), Limit(0.0f, 32.0f, 0.1f), VisibleIf(nameof(UseAdaptiveShadowFilter))")
     float AdaptiveShadowRadius = 2.5f;
 
     /// <summary>Uses the screen-space filter when adaptive filtering is disabled. Per-band overrides take precedence.</summary>
@@ -153,7 +153,7 @@ public:
 
     /// <summary>Enables the randomized adaptive shadow sampling pattern for comparison. Off uses fixed filter taps. The SDF measures the fully shadowed core of the completed filtered result.</summary>
     API_FIELD(Attributes="EditorOrder(147), EditorDisplay(\"Debug\", \"Shadow Jitter\")")
-    bool UseShadowJitter = false;
+    bool UseShadowJitter = true;
 
     /// <summary>Displays approximate receiver-surface distance to the fully shadowed core edge. Combines camera depth and light depth; negative inside, positive outside, in world centimeters. Only visible receiver surfaces are available. Debug only; does not modify lighting. Cascade debug takes priority.</summary>
     API_FIELD(Attributes="EditorOrder(150), EditorDisplay(\"Debug\", \"Shadow Distance Field\")")
@@ -167,7 +167,7 @@ public:
     API_FIELD(Attributes="EditorOrder(161), EditorDisplay(\"Debug\", \"SDF Side\"), VisibleIf(nameof(ShowShadowDistanceField))")
     ShadowDistanceSide DistanceFieldSide = ShadowDistanceSide::Both;
 
-    /// <summary>Cel preview fill inside the fully shadowed core. Zero keeps the original shadow; one lifts the deep core to lit visibility. The distance range controls how far the fill grows inward. Partial jitter/filter coverage is preserved exactly.</summary>
+    /// <summary>Cel preview fill at the jitter-to-core handoff. Zero keeps the original shadow. Higher values lift the handoff; the SDF fades this fill inward to the original shadow core over the distance range. The jitter curve keeps its shape and shares the handoff height.</summary>
     API_FIELD(Attributes="EditorOrder(162), EditorDisplay(\"Debug\", \"Shadow Fill Strength\"), Limit(0.0f, 1.0f, 0.01f), VisibleIf(nameof(ShowShadowDistanceField))")
     float ShadowFillStrength = 0.5f;
 

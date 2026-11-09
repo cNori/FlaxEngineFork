@@ -694,7 +694,7 @@ float4 LightingCascadeParameters; // Normal bias in world units, cascade index, 
 float4 LightingReductionFootprint; // XY: maximum reduced-sample displacement in normalized UV.
 float4 LightingDebugOptions; // X: lighting mode (0 material, 1 white, 2 cel), Y: distance field requested, Z: jump step, W: distance debug range (world centimeters).
 float4 LightingCelParameters; // X: band count, Y: use receiver SDF, Z: world distance range, W: core fill strength.
-float4 LightingShadowSampling; // X: adaptive jitter, Y: SDF side (0 both, 1 inner, 2 outer), Z: seed-only filter pass.
+float4 LightingShadowSampling; // X: adaptive jitter, Y: SDF side (0 both, 1 inner, 2 outer), Z: seed-only filter pass, W: world-origin noise phase.
 META_CB_END
 
 Texture2D<float> LightingReceiverDepth : register(t2);
@@ -962,8 +962,13 @@ float DistanceV2Footprint(float3 receiver, float depth, float2 pixel, float2 siz
 bool SameV2DistanceSurface(float3 p, float3 n, float3 q, float3 m, float footprint)
 {
     float3 delta = q - p;
-    float tolerance = max(0.005, max(footprint * 0.25, length(delta) * 0.02));
-    return dot(n, m) > 0.8 && abs(dot(delta, n)) <= tolerance && abs(dot(delta, m)) <= tolerance;
+    float agreement = clamp(dot(n, m), -1.0, 1.0);
+    // A curved receiver is not one infinite plane. Normal rotation bounds its
+    // expected departure from the endpoint tangent planes. Parallel depth layers
+    // get no curvature allowance, so a wall/foreground jump still fails.
+    float curvature = sqrt(max(0.0, 2.0 * (1.0 - agreement)));
+    float tolerance = max(0.005, footprint * 0.25 + length(delta) * curvature);
+    return agreement > 0.5 && abs(dot(delta, n)) <= tolerance && abs(dot(delta, m)) <= tolerance;
 }
 
 // Pack 3x7-bit normal into an exactly representable float integer. Zero is invalid.
@@ -1063,8 +1068,11 @@ float4 PS_V2ShadowDistanceJump(float4 position : SV_Position) : SV_Target
     float3 receiver = ReconstructV2Receiver(position.xy, depth, size);
     float footprint = DistanceV2Footprint(receiver, depth, position.xy, size);
     int step = (int)LightingDebugOptions.z;
-    float4 nearest = 0.0;
-    float best = 1e30;
+    // A valid seed already owned by this receiver is never discarded by a later jump.
+    // Previously even the centre candidate was re-tested through quantized-normal gates.
+    float4 nearest = ShadowDistanceSeedInput.Load(int3(pixel, 0));
+    float3 retainedDelta = nearest.xyz - receiver;
+    float best = nearest.w != 0.0 ? dot(retainedDelta, retainedDelta) : 1e30;
     UNROLL
     for (int y = -1; y <= 1; y++)
     {
@@ -1092,7 +1100,9 @@ float4 PS_V2ShadowDistanceJump(float4 position : SV_Position) : SV_Target
                 continue;
             float3 delta = seed.xyz - receiver;
             float d = dot(delta, delta);
-            if (d < best)
+            bool stableTie = d == best && (seed.x < nearest.x ||
+                (seed.x == nearest.x && (seed.y < nearest.y || (seed.y == nearest.y && seed.z < nearest.z))));
+            if (d < best || stableTie)
             {
                 best = d;
                 nearest = seed;
@@ -1129,14 +1139,20 @@ V2ShadowDistanceOutput PS_V2ShadowDistanceResolve(float4 position : SV_Position)
     ShadowDistanceSeedInput.GetDimensions(width, height);
     float3 receiver = ReconstructV2Receiver(position.xy, LightingReceiverDepth.Load(pixel), float2(width, height));
     float4 seed = ShadowDistanceSeedInput.Load(pixel);
-    // No reachable boundary is an explicit finite sentinel, independent of image dimensions/range.
-    float magnitude = seed.w == 0.0 ? 1e20 : length(seed.xyz - receiver);
+    float magnitude = length(seed.xyz - receiver);
     bool inside = surface.w < 0.5;
     uint side = (uint)LightingShadowSampling.y;
     if ((side == 1 && !inside) || (side == 2 && inside))
     {
         // Excluded halves do not contribute a distance ramp. Keep their sign for cel classification.
         output.Distance = inside ? -1e20 : 1e20;
+        return output;
+    }
+    if (seed.w == 0.0)
+    {
+        // Unavailable is not a very large valid distance. Mark it distinctly and never fill from it.
+        output.Distance = inside ? -1e30 : 1e30;
+        output.Debug = float4(0.5, 0.0, 0.5, 1);
         return output;
     }
     output.Distance = inside ? -magnitude : magnitude;
@@ -1163,7 +1179,18 @@ float SampleV2ShadowTile(float2 uv, float depth, float3 normal, float3 uncertain
     float bias = V2LightingReceiverBias(depthPerTexel, tile.zw, projection, uncertainty);
     // Debug comparison: fixed disk/rings by default; random rotation/radii only when requested.
     bool jitterEnabled = LightingShadowSampling.x != 0.0;
-    float noise = jitterEnabled ? InterleavedGradientNoise(pixel) : 0.0;
+    float noise = 0.0;
+    BRANCH
+    if (jitterEnabled)
+    {
+        uint receiverWidth, receiverHeight;
+        LightingReceiverDepth.GetDimensions(receiverWidth, receiverHeight);
+        float receiverDepth = LightingReceiverDepth.Load(int3(int2(pixel), 0));
+        float3 receiver = ReconstructV2Receiver(pixel, receiverDepth, float2(receiverWidth, receiverHeight));
+        float2 worldAnchor = float2(receiver.x + receiver.y * 0.754877666, receiver.z + receiver.y * 0.569840296);
+        float phase = dot(worldAnchor, float2(0.06711056, 0.00583715)) + LightingShadowSampling.w;
+        noise = frac(52.9829189 * frac(phase));
+    }
     float sine, cosine;
     sincos(noise * 6.2831853, sine, cosine);
     static const float2 directions[8] = {
@@ -1401,19 +1428,25 @@ float4 PS_V2DirectionalLighting(float4 position : SV_Position) : SV_Target
             float value = nDotL * saturate(visibility);
             // Keep the outer filtered gradient; apply SDF fill only inside its opaque core.
             BRANCH
-            if (LightingCelParameters.y != 0.0 && CelShadowReceivers.Load(pixel).w >= 0.0)
+            if (LightingCelParameters.y != 0.0 && CelShadowReceivers.Load(pixel).w >= 0.0 &&
+                abs(CelShadowDistance.Load(pixel)) < 1e29)
             {
                 float distance = CelShadowDistance.Load(pixel);
                 float range = max(LightingCelParameters.z, 0.001);
                 uint side = (uint)LightingShadowSampling.y;
                 float filteredVisibility = saturate(visibility);
                 float combinedVisibility = filteredVisibility;
-                // Preserve every penumbra pixel exactly. Full SHADOW AMOUNT 1 is visibility 0.
-                // Only the opaque core receives the SDF-controlled artistic fill.
-                if (side != 2 && filteredVisibility <= 0.0 && distance < 0.0)
+                // Keep the jitter curve's shape while moving its shadow-end height to the SDF join.
+                // Core fill then DECREASES with inward distance, rather than brightening the deep core.
+                if (side != 2)
                 {
-                    float coreWeight = smoothstep(0.0, range, -distance);
-                    combinedVisibility = saturate(LightingCelParameters.w) * coreWeight;
+                    float joinVisibility = saturate(LightingCelParameters.w);
+                    combinedVisibility = lerp(joinVisibility, 1.0, filteredVisibility);
+                    if (filteredVisibility <= 0.0 && distance < 0.0)
+                    {
+                        float inwardWeight = smoothstep(0.0, range, -distance);
+                        combinedVisibility = joinVisibility * (1.0 - inwardWeight);
+                    }
                 }
                 value = nDotL * combinedVisibility;
             }

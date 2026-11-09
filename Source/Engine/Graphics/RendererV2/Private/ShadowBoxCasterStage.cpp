@@ -9,6 +9,7 @@
 #include "Engine/Content/Assets/MaterialBase.h"
 #include "Engine/Content/Content.h"
 #include "Engine/Core/Math/BoundingFrustum.h"
+#include "Engine/Core/Math/Mathd.h"
 #include "Engine/Graphics/GPUBuffer.h"
 #include "Engine/Graphics/GPUContext.h"
 #include "Engine/Graphics/GPUDevice.h"
@@ -159,7 +160,7 @@ namespace
         Float4 ReductionFootprint; // XY: reduced depth sample support in normalized light-map UV.
         Float4 DebugOptions; // X: lighting mode (0 material, 1 white, 2 cel), Y: edge seeds, Z: jump step, W: debug range.
         Float4 CelParameters; // X: band count, Y: receiver SDF enabled, Z: world distance range, W: core fill strength.
-        Float4 ShadowSampling; // X: adaptive sampling jitter, Y: SDF side (0 both, 1 inner, 2 outer), Z: seed-only pass.
+        Float4 ShadowSampling; // X: adaptive sampling jitter, Y: SDF side (0 both, 1 inner, 2 outer), Z: seed-only pass, W: world-origin noise phase.
     });
 
 
@@ -451,7 +452,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     }
     const int32 farResolution = useTiers ? FarShadowResolution : resolution;
     const float inheritedRadius = adaptiveFilter
-        ? Math::Clamp(adaptiveRadius, 0.0f, 4.0f) : 0.0f;
+        ? Math::Clamp(adaptiveRadius, 0.0f, 32.0f) : 0.0f;
     float filterRadius = useConfiguredCascades ? 0.0f : inheritedRadius;
     struct CascadeFilter
     {
@@ -470,10 +471,10 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                 (inheritedRadius > 0 ? ShadowCascadeFilterMode::Adaptive :
                     (screenSpaceFilter ? ShadowCascadeFilterMode::ScreenSpace : ShadowCascadeFilterMode::Hard)) :
                 cascade.FilterMode;
-            const float radius = Math::Clamp(cascade.FilterRadius, 0.0f, 4.0f);
+            const float radius = Math::Clamp(cascade.FilterRadius, 0.0f, 32.0f);
             CascadeFilter filter;
             filter.AdaptiveRadius = mode == ShadowCascadeFilterMode::Adaptive ? (inherit ? inheritedRadius : radius) : 0.0f;
-            filter.ScreenRadius = mode == ShadowCascadeFilterMode::ScreenSpace ? (inherit ? 4.0f : radius) : 0.0f;
+            filter.ScreenRadius = mode == ShadowCascadeFilterMode::ScreenSpace ? (inherit ? 4.0f : Math::Min(radius, 4.0f)) : 0.0f;
             const float angle = Math::Clamp(inherit ? angularRadius : cascade.AngularRadius, 0.0f, 45.0f);
             filter.AngularTangent = Math::Tan(angle * DegreesToRadians);
             cascadeFilters.Add(filter);
@@ -1021,6 +1022,19 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     resolve.AmbientIntensity = AmbientIntensity;
     resolve.ShadowSampling.X = settings && settings->UseShadowJitter ? 1.0f : 0.0f;
     resolve.ShadowSampling.Y = settings ? (float)(int32)settings->DistanceFieldSide : 0.0f;
+    // Keep jitter attached to world receivers even if WorldWarp changes the local origin.
+    if (view->Source)
+    {
+        auto* source = view->Source->GetIC_Source();
+        const auto* sourcePose = source ? static_cast<const Transform*>(source->GetIC_WorldTransform()) : nullptr;
+        if (sourcePose)
+        {
+            const Vector3 origin = sourcePose->Translation - view->LocalTransform.Translation;
+            const double phase = ((double)origin.X + (double)origin.Y * (double)0.754877666f) * (double)0.06711056f +
+                ((double)origin.Z + (double)origin.Y * (double)0.569840296f) * (double)0.00583715f;
+            resolve.ShadowSampling.W = (float)(phase - Math::Floor(phase));
+        }
+    }
     resolve.DebugOptions.X = settings && settings->ShowCelShading ? 2.0f :
         settings && settings->ShowWhiteSurfaceLighting ? 1.0f : 0.0f;
     resolve.CameraPosition = Float3(view->LocalTransform.Translation);
@@ -1362,7 +1376,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                 if (applyScreenFilter &&
                     (useConfiguredCascades ? visibilityTexture != nullptr :
                         preparePass(ShadowMaskState, ShadowMask, "PS_V2ShadowMask", TEXT("V2 Shadow Mask"), PixelFormat::R16G16_Float)) &&
-                    preparePass(ShadowFilterState, FilteredShadowMask, "PS_V2ShadowFilter", TEXT("V2 Filtered Shadow Mask"), PixelFormat::R8_UNorm))
+                    preparePass(ShadowFilterState, FilteredShadowMask, "PS_V2ShadowFilter", TEXT("V2 Filtered Shadow Mask"), PixelFormat::R16_Float))
                 {
                     if (distanceReady)
                     {
