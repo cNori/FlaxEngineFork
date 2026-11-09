@@ -142,7 +142,7 @@ float V2ShadowTierWeight(float3 coord, float viewDepth, float2 split, float2 til
     return borderWeight * (1.0 - smoothstep(split.x, split.y, viewDepth));
 }
 
-#if defined(_CS_V2ProjectCameraReceivers) || defined(_PS_V2ReceiverDepthCross) || defined(_CS_ShadowCasterSelection) || defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask)
+#if defined(_CS_V2ProjectCameraReceivers) || defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowDistanceReceivers)
 // Receiver-plane correction: how much LIGHT device depth changes for one light-map texel.
 // Inputs: unit world-space normal, world-to-light clip matrix, light-map size in texels.
 // Output: (depth change per +X texel, depth change per +Y texel), not world distance.
@@ -284,7 +284,7 @@ float V2ReceiverDepthBias(float precisionBias, float2 depthPerTexel, float2 size
 }
 #endif
 
-#if defined(_CS_ShadowCasterSelection) || defined(_VS_ShadowCasterBoundsDebug) || defined(_PS_V2ShadowResourceDebug) || defined(_PS_V2LightPOVShaded) || defined(_CS_V2LightCasterVisibility) || defined(_VS_V2ShadowProxyDepth) || defined(_PS_V2ReceiverDepthCross) || defined(_PS_V2ReceiverTraceProbe) || defined(_CS_V2ProjectCameraReceivers) || defined(_CS_V2ReceiverMaskCasters) || defined(_CS_V2ReceiverTileMax)
+#if defined(_VS_ShadowCasterBoundsDebug) || defined(_CS_V2LightCasterVisibility) || defined(_CS_V2ProjectCameraReceivers) || defined(_CS_V2ReceiverMaskCasters) || defined(_CS_V2ReceiverTileMax)
 
 META_CB_BEGIN(1, ShadowCasterSelectionData)
 float4x4 InverseViewProjection;
@@ -296,7 +296,7 @@ uint Width;
 uint Height;
 uint CasterCount;
 uint GroupsPerRow;
-uint WriteDebugMask;
+uint SelectionPadding0;
 uint HasLightDepth;
 uint HasReceiverNormals;
 float ShadowSelectionFilterRadius;
@@ -307,9 +307,8 @@ float4 SelectionCameraPosition;
 float4 SelectionCameraForward;
 float4 SelectionReceiverRange; // Retained for shared shadow resolve data. Candidate selection is view-wide.
 uint CasterDebugFlags; // Bit 0: selected expensive casters. Bit 1: rejected expensive casters.
-float SelectionReceiverBias;
-uint ReceiverTraceStep;
-uint ReceiverTraceCaster;
+float SelectionPadding1;
+uint2 SelectionPadding2;
 META_CB_END
 
 struct ShadowCasterBounds
@@ -317,9 +316,7 @@ struct ShadowCasterBounds
     float3 Minimum;
     uint UseProxy;
     float3 Maximum;
-    uint DebugCategory;
-    uint CameraIndex;
-    uint3 Padding;
+    uint Padding;
 };
 
 #endif
@@ -393,7 +390,7 @@ void CS_V2ProjectCameraReceivers(uint3 id : SV_DispatchThreadID)
 }
 #endif
 
-#if defined(_CS_V2ReceiverMaskCasters) || defined(_CS_V2ReceiverTileMax) || defined(_PS_V2ShadowResourceDebug)
+#if defined(_CS_V2ReceiverMaskCasters) || defined(_CS_V2ReceiverTileMax)
 Texture2D<uint> CameraReceiverCoverage : register(t24);
 Texture2D<uint> CameraReceiverNear : register(t25);
 Texture2D<uint> CameraReceiverFar : register(t26);
@@ -583,409 +580,9 @@ void CS_V2ReceiverMaskCasters(uint3 group : SV_GroupID, uint thread : SV_GroupIn
 #endif
 
 
-#ifdef _CS_ShadowCasterSelection
-// Selection inputs (these are separate projections; their raw depths cannot be subtracted):
-//   ReceiverDepth: nearest opaque surface seen by the CAMERA, device depth.
-//   LightDepth: cheap real geometry rendered from the LIGHT, device depth.
-//   ProxySelectionDepth: expensive geometry's AABB proxies rendered from the LIGHT.
-//   LightCasterVisibility: earlier light-POV visibility result, indexed by caster.
-// All world positions/bounds use the same render-origin offset as the view matrices.
-Texture2D<float> ReceiverDepth : register(t2);
-Texture2D<float> LightDepth : register(t7);
-Texture2D<float4> ShadowReceiverNormals : register(t8);
-StructuredBuffer<uint> LightCasterVisibility : register(t21);
-Texture2D<float> ProxySelectionDepth : register(t22);
-StructuredBuffer<uint> CameraCasterVisibility : register(t23);
-StructuredBuffer<uint> CameraReceiverCasterVisibility : register(t27);
-StructuredBuffer<ShadowCasterBounds> ShadowCasterBoxes : register(t3);
-RWStructuredBuffer<uint> CasterSelection : register(u1);
-RWTexture2D<uint> ReceiverHits : register(u2);
-#if 1 // Region: receiver selection diagnostics
-// Diagnostic output only. Step IDs match Receiver Debug Step in pipeline settings:
-// 0 decision, 1 camera depth, 2 world position, 3 normal, 4 receiver bias,
-// 5 light UV/depth, 6 proxy separation, 7 cheap separation, 8 tolerance,
-// 9 surface confidence, 10 cheap taps, 11 proxy taps.
-// Each selected view stores RAW values. The resource-debug pixel shader below
-// converts them to colours; its RGB can differ from the numeric probe's raw RGB.
-RWTexture2D<float4> ReceiverTraceOutput : register(u3);
-void TraceReceiverValue(bool trace, uint2 pixel, uint step, float4 value)
-{
-    if (trace && ReceiverTraceStep == step) ReceiverTraceOutput[pixel] = value;
-}
-// Decision view: R stores the reason. Other views: negative A means the pixel
-// exited before producing that view's values. Earlier completed views stay intact
-// where the caller explicitly guards this write.
-// Reasons: 1 outside sweep (cleared by CPU), 2 no camera surface, 3 light-hidden,
-// 4 ray misses AABB, 5 back-facing, 7 proxy miss, 8 cheap-occluded,
-// 9 accepted, 10 accepted with uncertain/mixed samples.
-void TraceReceiverExit(bool trace, uint2 pixel, uint reason)
-{
-    if (trace) ReceiverTraceOutput[pixel] = ReceiverTraceStep == 0 ? float4(reason, 0, 0, 0) : float4(0, 0, 0, -float(reason));
-}
-#endif // Region: receiver selection diagnostics
-
-// One shared flag for the caster's 64-thread group. Any accepted receiver sets it.
-groupshared uint ProxyHit;
-
-// This map contains cheap occluders for the entire view/light, never a cascade.
-// Reject only when all four neighboring light-depth samples prove the receiver blocked.
-// receiver/normal: camera-visible surface in world/origin space, BEFORE selection bias.
-// receiverW: its homogeneous camera unprojection W, used for precision estimation.
-// Result true means all four LIGHT depth taps prove a cheap occluder is in front.
-// Missing/out-of-map taps keep the receiver potential (false): conservative policy.
-// Diagnostic outputs: differences=(min gap cm, max gap cm, tolerance cm, valid bits);
-// coverage=(valid bits, blocked bits, tolerance cm, 1). Bits 1,2,4,8 form a 2x2 quad.
-bool IsReceiverBlockedByCheapOccluders(float3 receiver, float3 normal, uint2 pixel, float cameraDepth, float receiverW, bool trace, out float4 differences, out float4 coverage)
-{
-    differences = 0;
-    coverage = 0;
-    if (!HasLightDepth)
-        return false;
-    // Move the CAMERA surface into LIGHT UV/depth so both depths share a projection.
-    float3 coord = ProjectV2Shadow(receiver, LightViewProjection);
-    if (!IsV2ShadowCoordValid(coord))
-        return false;
-    float2 size = SelectionShadowTiles[0].zw;
-    // Texel centres are integer coordinates after subtracting 0.5. floor() gives
-    // the upper-left member of the four surrounding samples. This is NOT a
-    // bilinear filtered depth fetch: all four samples are tested independently.
-    float2 receiverTexel = coord.xy * size - 0.5;
-    int2 first = int2(floor(receiverTexel));
-    if (any(first < 0) || any(first + 1 >= int2(size)))
-        return false;
-    float2 depthPerTexel = HasReceiverNormals ? V2ShadowDepthPerTexel(normal, LightViewProjection, size) : 0;
-    float3 uncertainty = V2CameraDepthUncertainty(receiver, receiverW, InverseViewProjection);
-    float bias = V2ReceiverDepthBias(SelectionShadowSplit.w, depthPerTexel, size, LightViewProjection, uncertainty);
-    float minimum = 1e30, maximum = -1e30;
-    uint validMask = 0, blockedMask = 0;
-    UNROLL
-    for (uint tap = 0; tap < 4; tap++)
-    {
-        int2 texel = first + int2(tap & 1, tap >> 1);
-        float blocker = LightDepth.Load(int3(texel, 0));
-        // Extrapolate the receiver PLANE to this light texel's centre.
-        // The normal therefore affects both this depth correction and the bias.
-        float receiverDepth = coord.z + dot(depthPerTexel, texel - receiverTexel);
-        bool valid = blocker != DEPTH_RANGE_MAX;
-        // Positive gap = receiver is farther from the light than the blocker.
-        // DEPTH_DIFF swaps subtraction for reversed Z; do not compare raw camera
-        // depth against raw light depth. Both operands here are LIGHT depth.
-        float separation = DEPTH_DIFF(receiverDepth, blocker);
-        if (valid)
-        {
-            validMask |= 1u << tap;
-            minimum = min(minimum, separation);
-            maximum = max(maximum, separation);
-        }
-        // A tap blocks only beyond the allowed precision/slope error.
-        // Preserve the existing negated <= comparison, including its NaN behaviour.
-        if (valid && !(separation <= bias)) blockedMask |= 1u << tap;
-        // Normal execution stops at the first inconclusive/clear tap. Diagnostics
-        // visit all four so the min/max gaps and tap masks can be inspected.
-        else if (!trace) return false;
-    }
-    float span = SelectionReceiverRange.z;
-    differences = float4(validMask ? minimum * span : 0, validMask ? maximum * span : 0, bias * span, validMask);
-    coverage = float4(validMask, blockedMask, bias * span, 1);
-    // 15 = 1|2|4|8: ONE clear or missing tap is enough to keep this receiver.
-    return blockedMask == 15u;
-}
-
-// Slab ray/AABB intersection. Start at a receiver and travel TOWARD the light:
-// P(t) = receiver + DirectionToLight*t, for 0 <= t <= ProjectionDistance.
-// If the ray crosses the caster box, that caster could shadow this receiver.
-// enter/leave are distances along the ray in world units, not device depths.
-bool IntersectsCaster(float3 receiver, float3 boxMin, float3 boxMax)
-{
-    float enter = 0.0;
-    float leave = ProjectionDistance;
-    UNROLL
-    for (uint axis = 0; axis < 3; axis++)
-    {
-        float direction = DirectionToLight[axis];
-        if (abs(direction) < 1e-8)
-        {
-            if (receiver[axis] < boxMin[axis] || receiver[axis] > boxMax[axis])
-                return false;
-        }
-        else
-        {
-            // Solve where the ray crosses the two planes for this axis; intersect
-            // that interval with the intervals from the other axes.
-            float a = (boxMin[axis] - receiver[axis]) / direction;
-            float b = (boxMax[axis] - receiver[axis]) / direction;
-            enter = max(enter, min(a, b));
-            leave = min(leave, max(a, b));
-        }
-    }
-    return leave >= enter;
-}
-
-// LEGACY CAMERA-RAY SEARCH: used for explicit receiver diagnostics, or as a
-// fallback when no shared light-depth map is available. With the receiver map
-// present, CS_V2ReceiverMaskCasters supplies final flags; this trace cannot
-// override them. It intentionally remains available to inspect the old tests.
-// CASTER SELECTION FLOW (one 64-thread group per caster):
-// 1 light visibility -> 2 swept camera rectangle -> 3 camera surface reconstruction
-// -> 4 normal/facing -> 5 biased ray/AABB -> 6 proxy light-depth check
-// -> 7 cheap occluder light-depth check -> 8 retain caster if ANY receiver survives.
-// This finds potential shadow contribution, not the final shadow mask/lighting.
-// Debug views write intermediate values; they do not define the acceptance policy.
-META_CS(true, FEATURE_LEVEL_SM5)
-[numthreads(64, 1, 1)]
-void CS_ShadowCasterSelection(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
-{
-    uint caster = group.y * GroupsPerRow + group.x;
-    if (caster >= CasterCount)
-        return;
-
-    // 1. Read this caster and the earlier LIGHT-POV visibility result.
-    ShadowCasterBounds box = ShadowCasterBoxes[caster];
-    bool trace = (CasterDebugFlags & 128u) != 0 && caster == ReceiverTraceCaster;
-    bool lightVisible = !HasLightDepth || LightCasterVisibility[caster] != 0;
-    // Shared light-space mask broad phase; the camera-ray checks below remain the fine phase.
-    bool receiverVisible = (CasterDebugFlags & 131072u) == 0 || CameraReceiverCasterVisibility[caster] != 0;
-    if ((CasterDebugFlags & 64u) != 0 && box.CameraIndex != 0xffffffffu && CameraCasterVisibility[box.CameraIndex] == 0)
-        box.DebugCategory = (box.DebugCategory & ~1u) | 2u;
-    bool writeDebugHits = WriteDebugMask != 0 && ((CasterDebugFlags & 4u) == 0 || (box.DebugCategory & 128u) != 0);
-    if ((!lightVisible || !receiverVisible) && !trace)
-    {
-        if (thread == 0)
-            CasterSelection[caster] = 0;
-        return;
-    }
-    // Cheap geometry also needs a visible receiver. A camera-hidden caster is
-    // retained when its light-space sweep reaches a camera-visible surface.
-
-    // 2. Bound the CAMERA pixels worth testing. Extrude the AABB AWAY from the
-    // light by ProjectionDistance, then project that swept volume into the camera.
-    // This rectangle is a broad phase: pixels inside still need the exact ray test.
-    // A corner behind the camera falls back to the whole screen to avoid misses.
-    float3 offset = -DirectionToLight * ProjectionDistance;
-    float3 boundsMin = box.Minimum + min(offset, 0);
-    float3 boundsMax = box.Maximum + max(offset, 0);
-    float2 minUV = 1, maxUV = 0;
-    UNROLL
-    for (uint corner = 0; corner < 8; corner++)
-    {
-        float3 cornerPosition = float3(
-            (corner & 1) ? boundsMax.x : boundsMin.x,
-            (corner & 2) ? boundsMax.y : boundsMin.y,
-            (corner & 4) ? boundsMax.z : boundsMin.z);
-        float4 clip = PROJECT_POINT(float4(cornerPosition, 1), ShadowViewProjection);
-        if (clip.w <= 0)
-        {
-            minUV = 0;
-            maxUV = 1;
-            break;
-        }
-        float2 uv = clip.xy / clip.w * float2(0.5, -0.5) + 0.5;
-        minUV = min(minUV, uv);
-        maxUV = max(maxUV, uv);
-    }
-
-    uint2 size = uint2(Width, Height);
-    uint2 first = uint2(floor(saturate(minUV) * size));
-    uint2 last = uint2(ceil(saturate(maxUV) * size));
-    uint2 extent = last - first;
-    if (thread == 0)
-        ProxyHit = 0;
-    GroupMemoryBarrierWithGroupSync();
-    // Distribute the rectangle's pixels over 64 threads (thread, thread+64, ...).
-    for (uint index = thread; index < extent.x * extent.y; index += 64)
-    {
-        uint2 pixel = first + uint2(index % extent.x, index / extent.x);
-        float depth = ReceiverDepth.Load(int3(pixel, 0));
-        if (depth == DEPTH_RANGE_MAX)
-        {
-            TraceReceiverExit(trace, pixel, 2);
-            continue;
-        }
-        if (!lightVisible)
-        {
-            TraceReceiverExit(trace, pixel, 3);
-            continue;
-        }
-        // 3. Reconstruct the CAMERA-visible surface. Pixel centre -> UV -> NDC;
-        // then inverse camera VP gives q, and q.xyz/q.w gives world position.
-        // Empty camera depth above is sky, so it cannot receive a visible shadow.
-        if (!receiverVisible)
-        {
-            TraceReceiverExit(trace, pixel, 11); // No light-space camera-visible receiver behind this caster.
-            continue;
-        }
-        float2 uv = (float2(pixel) + 0.5) / size;
-        float2 ndc = uv * float2(2, -2) + float2(-1, 1);
-        float4 receiver = PROJECT_POINT(float4(ndc, depth, 1), InverseViewProjection);
-        float3 receiverPosition = receiver.xyz / receiver.w;
-        float3 cameraUncertainty = V2CameraDepthUncertainty(receiverPosition, receiver.w, InverseViewProjection);
-        TraceReceiverValue(trace, pixel, 1, float4(depth, length(receiverPosition - SelectionCameraPosition.xyz), length(cameraUncertainty), 1));
-        TraceReceiverValue(trace, pixel, 2, float4(receiverPosition, 1));
-        // Cheap broad phase only; the acceptance test below uses the original box.
-        if (!IntersectsCaster(receiverPosition, box.Minimum - SelectionReceiverBias, box.Maximum + SelectionReceiverBias))
-        {
-            if (ReceiverTraceStep == 0 || ReceiverTraceStep > 2) TraceReceiverExit(trace, pixel, 4);
-            continue;
-        }
-
-        // 4. Recover a geometric receiver normal. A reliable back-facing surface
-        // cannot receive this direct light; an unreliable edge fit stays potential.
-        // Surface Normal shows XYZ; Surface Confidence shows the fit flag and N.L.
-        float3 normal = 0;
-        float planeConfidence = 0;
-        if (HasReceiverNormals)
-        {
-            normal = normalize(ShadowReceiverNormals.Load(int3(pixel, 0)).xyz * 2.0 - 1.0);
-            float4 plane = V2ReceiverPlaneNormalChecked(ReceiverDepth, receiverPosition, depth, int2(pixel), float2(Width, Height),
-                InverseViewProjection, normal);
-            normal = plane.xyz;
-            planeConfidence = plane.w;
-            TraceReceiverValue(trace, pixel, 3, plane);
-            TraceReceiverValue(trace, pixel, 9, float4(plane.w, dot(normal, DirectionToLight), length(cameraUncertainty), 1));
-            // Matching the occluder's depth only identifies its surface. Its
-            // back face cannot receive direct light or a shadow from that light.
-            // Reject only a reliable geometric plane; silhouettes stay potential.
-            if (box.UseProxy && plane.w != 0 && dot(normal, DirectionToLight) < -0.0001)
-            {
-                if (ReceiverTraceStep != 3 && ReceiverTraceStep != 9 && ReceiverTraceStep > 2 || ReceiverTraceStep == 0)
-                    TraceReceiverExit(trace, pixel, 5);
-                continue;
-            }
-        }
 
 
-        // 5. Test the original AABB using an adjusted receiver. This changes the
-        // ray START, not the box, light direction or actual rendered geometry.
-        // Bias only the selection ray's start, opposite the surface normal.
-        // Reconstruct the geometric plane from the original, unbiased depth.
-        float3 testReceiver = receiverPosition - normal * SelectionReceiverBias;
-        TraceReceiverValue(trace, pixel, 4, float4(testReceiver - receiverPosition, SelectionReceiverBias));
-        if (!IntersectsCaster(testReceiver, box.Minimum, box.Maximum))
-        {
-            if (ReceiverTraceStep == 0 || ReceiverTraceStep > 4 && ReceiverTraceStep != 9) TraceReceiverExit(trace, pixel, 4);
-            continue;
-        }
-
-        bool uncertain = planeConfidence == 0;
-        if (HasLightDepth && box.UseProxy)
-        {
-            // 6. Test expensive AABB proxies in the shared LIGHT depth map.
-            // A proxy is potential when it lies in front of/near this receiver.
-            // Missing map data also stays potential rather than causing a false cull.
-            // Cross in light space, never subtract depths from different projections.
-            // Only reject when all four proxy-map neighbors are at/behind the receiver.
-            float3 coord = ProjectV2Shadow(testReceiver, LightViewProjection);
-            TraceReceiverValue(trace, pixel, 5, float4(coord, IsV2ShadowCoordValid(coord) ? 1 : 0));
-            float2 mapSize = SelectionShadowTiles[0].zw;
-            int2 firstTexel = int2(floor(coord.xy * mapSize - 0.5));
-            if (IsV2ShadowCoordValid(coord) && all(firstTexel >= 0) && all(firstTexel + 1 < int2(mapSize)))
-            {
-                bool potential = false;
-                uint proxyValidMask = 0, proxyPotentialMask = 0;
-                float minimum = 1e30, maximum = -1e30;
-                UNROLL
-                for (uint tap = 0; tap < 4; tap++)
-                {
-                    float blocker = ProxySelectionDepth.Load(int3(firstTexel + int2(tap & 1, tap >> 1), 0));
-                    bool valid = blocker != DEPTH_RANGE_MAX;
-                    float separation = DEPTH_DIFF(coord.z, blocker);
-                    // Current experimental threshold: TWO times the base light-depth
-                    // allowance. Debug B below still reports ONE base allowance.
-                    // Keep this distinction in mind when comparing the raw values.
-                    bool possible = !valid || separation >= -(SelectionShadowSplit.w + SelectionShadowSplit.w);
-                    potential = potential || possible;
-                    if (valid) { proxyValidMask |= 1u << tap; minimum = min(minimum, separation); maximum = max(maximum, separation); }
-                    if (possible) proxyPotentialMask |= 1u << tap;
-                }
-                float span = SelectionReceiverRange.z;
-                TraceReceiverValue(trace, pixel, 6, float4(proxyValidMask ? minimum * span : 0, proxyValidMask ? maximum * span : 0, SelectionShadowSplit.w * span, proxyValidMask));
-                TraceReceiverValue(trace, pixel, 11, float4(proxyValidMask, proxyPotentialMask, SelectionShadowSplit.w * span, 1));
-                uncertain = uncertain || proxyValidMask != 15u || (proxyPotentialMask != 0u && proxyPotentialMask != 15u);
-                if (!potential)
-                {
-                    if (ReceiverTraceStep == 0 || ReceiverTraceStep == 7 || ReceiverTraceStep == 8 || ReceiverTraceStep == 10) TraceReceiverExit(trace, pixel, 7);
-                    continue;
-                }
-            }
-            else uncertain = true;
-        }
-        // 7. A cheap real occluder can invalidate the proxy's potential hit.
-        // Use the ORIGINAL receiver here: a normal offset inside a wall must not
-        // become evidence of a real blocker. See the four-tap test above.
-        float4 cheapDifference = 0, cheapCoverage = 0;
-        bool blocked = box.UseProxy && IsReceiverBlockedByCheapOccluders(receiverPosition, normal, pixel, depth, receiver.w, trace, cheapDifference, cheapCoverage);
-        TraceReceiverValue(trace, pixel, 7, cheapDifference);
-        TraceReceiverValue(trace, pixel, 8, float4(SelectionShadowSplit.w * SelectionReceiverRange.z, length(cameraUncertainty), cheapDifference.z, 1));
-        TraceReceiverValue(trace, pixel, 10, cheapCoverage);
-        if (blocked)
-        {
-            if (ReceiverTraceStep == 0) TraceReceiverExit(trace, pixel, 8);
-            continue;
-        }
-        // 8. This pixel survived all rejection tests, so retain the caster.
-        // uncertain only chooses the DEBUG decision colour; it does not reject it.
-        uncertain = uncertain || cheapCoverage.x != 15 || (cheapCoverage.y != 0 && cheapCoverage.y != 15);
-        if (ReceiverTraceStep == 0) TraceReceiverExit(trace, pixel, uncertain ? 10u : 9u);
-        InterlockedOr(ProxyHit, 1u);
-        if (writeDebugHits && box.UseProxy && ((CasterDebugFlags & 16u) == 0 || (box.DebugCategory & 6u) != 0))
-        {
-            if ((CasterDebugFlags & 8u) != 0)
-                InterlockedMin(ReceiverHits[pixel], box.DebugCategory);
-            else
-                InterlockedOr(ReceiverHits[pixel], box.DebugCategory & 7u);
-        }
-        else if (!trace)
-            break;
-    }
-    GroupMemoryBarrierWithGroupSync();
-    // One accepted pixel anywhere in the rectangle keeps the entire caster.
-    // The group must finish its atomic writes before thread 0 publishes the flags.
-    if (thread == 0)
-        CasterSelection[caster] = ProxyHit != 0 ? 3u : 0u;
-}
-
-#endif
-
-#ifdef _PS_ShadowReceiverHits
-
-Texture2D<uint> ShadowReceiverHitMask : register(t4);
-
-META_PS(true, FEATURE_LEVEL_SM5)
-float4 PS_ShadowReceiverHits(float4 position : SV_Position) : SV_Target
-{
-    uint hit = ShadowReceiverHitMask.Load(int3(int2(position.xy), 0));
-    if ((hit & 0x80000000u) != 0)
-    {
-        if (hit == 0xffffffffu)
-            return 0;
-        float hue = (float)((hit >> 8) & 65535u) / 65536.0;
-        float3 color = saturate(abs(frac(hue + float3(0, 2.0 / 3.0, 1.0 / 3.0)) * 6 - 3) - 1);
-        return float4(color, 0.65);
-    }
-    float3 color = 0;
-    uint count = 0;
-    if (hit & 1)
-    {
-        color += float3(1.0, 0.2, 0.04); // Camera-visible caster
-        count++;
-    }
-    if (hit & 2)
-    {
-        color += float3(0.05, 0.8, 1.0); // Camera-occluded caster
-        count++;
-    }
-    if (hit & 4)
-    {
-        color += float3(0.85, 0.15, 1.0); // Outside the camera frustum
-        count++;
-    }
-    return float4(color / max(count, 1u), count ? 0.7 : 0.0);
-}
-
-#endif
-
-#ifdef _CS_V2DepthOcclusion
-
+#if defined(_CS_V2DepthOcclusion) || defined(_PS_V2ShadowDepthReduce)
 META_CB_BEGIN(2, V2OcclusionData)
 float4x4 OcclusionViewProjection;
 uint OcclusionWidth;
@@ -993,7 +590,9 @@ uint OcclusionHeight;
 uint OcclusionCount;
 uint OcclusionGroupsPerRow;
 META_CB_END
+#endif
 
+#ifdef _CS_V2DepthOcclusion
 struct V2OcclusionBounds
 {
     float4 Minimum;
@@ -1072,7 +671,7 @@ void CS_V2DepthOcclusion(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
 
 #endif
 
-#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowFilter) || defined(_PS_V2ShadowBlendReduce) || defined(_PS_V2ShadowBlendFilter) || defined(_PS_V2ShadowBlendCombine)
+#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowDistanceReceivers) || defined(_PS_V2ShadowFilter) || defined(_PS_V2ShadowDistanceJump) || defined(_PS_V2ShadowDistanceResolve)
 
 #include "./Flax/Lighting/Lighting.hlsl"
 
@@ -1092,10 +691,10 @@ float4 LightingShadowTiles[2];
 float4 LightingShadowSplit;
 float4 LightingCascadeRange; // Inner radius, fade start radius, outer radius.
 float4 LightingCascadeParameters; // Normal bias in world units, cascade index, debug enabled, screen filter radius.
-float4 ShadowBlendParameters; // Inverse target size for reduce/combine; filter axis UV step and radius for blur.
-uint ShadowBlendInputVisibility;
-uint ShadowBlendDebugMode;
-float2 ShadowBlendPadding;
+float4 LightingReductionFootprint; // XY: maximum reduced-sample displacement in normalized UV.
+float4 LightingDebugOptions; // X: lighting mode (0 material, 1 white, 2 cel), Y: distance field requested, Z: jump step, W: distance debug range (world centimeters).
+float4 LightingCelParameters; // X: band count, Y: use receiver SDF, Z: world distance range, W: core fill strength.
+float4 LightingShadowSampling; // X: adaptive jitter, Y: SDF side (0 both, 1 inner, 2 outer), Z: seed-only filter pass.
 META_CB_END
 
 Texture2D<float> LightingReceiverDepth : register(t2);
@@ -1138,7 +737,7 @@ float4 V2NearShadowSample(float3 receiver)
         LightingShadowTiles[1].zw, LightingShadowFilter.w));
 }
 
-#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask)
+#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowDistanceReceivers)
 float2 V2InvAtlasSize()
 {
     uint width, height;
@@ -1149,6 +748,16 @@ float2 V2InvAtlasSize()
 float4x4 V2LightingShadowProjection(uint tier)
 {
     return tier == 0 ? LightingLightViewProjection : LightingNearLightViewProjection;
+}
+
+// A reduced texel stores the NEAREST sample across its source footprint,
+// not the depth at its centre. On the receiver plane this difference is bounded
+// by |depth gradient| dot footprint radius. Compensate that displacement only;
+// the unreduced map keeps its original comparison and bias.
+float V2LightingReceiverBias(float2 depthPerTexel, float2 size, float4x4 projection, float3 uncertainty)
+{
+    float bias = V2ReceiverDepthBias(LightingShadowSplit.w, depthPerTexel, size, projection, uncertainty);
+    return bias + dot(abs(depthPerTexel) * size, LightingReductionFootprint.xy);
 }
 
 float4 GatherV2ReceiverSeparation(float2 texel, float2 receiverTexel, float4 tile, float2 invAtlasSize,
@@ -1191,7 +800,7 @@ float SampleV2ReceiverPlane(float2 texel, float2 receiverTexel, float4 tile, flo
 
 #endif
 
-#if defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask)
+#if defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowDistanceReceivers)
 
 // Also use the adaptive filter when a legacy view needs an explicit mask.
 float SampleV2ShadowTile(float2 uv, float depth, float3 normal, float3 uncertainty, float2 pixel, uint tier);
@@ -1202,7 +811,7 @@ float2 SampleV2MaskTile(float3 receiver, float3 normal, float3 uncertainty, floa
     float2 receiverTexel = coord.xy * tile.zw - 0.5;
     float4x4 projection = V2LightingShadowProjection(tier);
     float2 depthPerTexel = V2ShadowDepthPerTexel(normal, projection, tile.zw);
-    float bias = V2ReceiverDepthBias(LightingShadowSplit.w, depthPerTexel, tile.zw, projection, uncertainty);
+    float bias = V2LightingReceiverBias(depthPerTexel, tile.zw, projection, uncertainty);
     float coverage = SampleV2ReceiverPlane(receiverTexel, receiverTexel, tile, V2InvAtlasSize(), coord.z, depthPerTexel, bias);
     if (coverage >= 1.0)
         return float2(1, 0.5);
@@ -1259,8 +868,7 @@ float2 PS_V2ShadowMask(float4 position : SV_Position) : SV_Target
 
 #ifdef _PS_V2ShadowFilter
 
-META_PS(true, FEATURE_LEVEL_SM5)
-float PS_V2ShadowFilter(float4 position : SV_Position) : SV_Target
+float FilterV2ShadowVisibility(float4 position)
 {
     int2 pixel = int2(position.xy);
     float depth = LightingReceiverDepth.Load(int3(pixel, 0));
@@ -1328,7 +936,218 @@ float PS_V2ShadowFilter(float4 position : SV_Position) : SV_Target
 
 #endif
 
-#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowMask)
+#if defined(_PS_V2ShadowFilter) || defined(_PS_V2ShadowDistanceJump) || defined(_PS_V2ShadowDistanceResolve)
+// RGB = geometric receiver normal; A = filtered shadow coverage, -1 = unreliable/background.
+Texture2D<float4> ShadowDistanceReceiverInput : register(t15);
+
+// Geometry validity is separate from shadow classification. The red/core region is
+// shadow amount 1, i.e. VISIBILITY 0 after filtering; penumbra pixels remain outside.
+float4 GetV2CoreReceiverData(int2 pixel)
+{
+    float4 receiver = ShadowDistanceReceiverInput.Load(int3(pixel, 0));
+    if (receiver.w >= 0.0)
+        receiver.w = FilteredShadowMask.Load(int3(pixel, 0)) <= 0.0 ? 0.0 : 1.0;
+    return receiver;
+}
+
+float DistanceV2Footprint(float3 receiver, float depth, float2 pixel, float2 size)
+{
+    float3 x = ReconstructV2Receiver(pixel + float2(1, 0), depth, size) - receiver;
+    float3 y = ReconstructV2Receiver(pixel + float2(0, 1), depth, size) - receiver;
+    return max(max(length(x), length(y)), 0.001);
+}
+
+// Compare geometry in world/origin-relative space, never material shading normals.
+// Plane tolerance permits quantization and gentle curvature, but rejects depth layers.
+bool SameV2DistanceSurface(float3 p, float3 n, float3 q, float3 m, float footprint)
+{
+    float3 delta = q - p;
+    float tolerance = max(0.005, max(footprint * 0.25, length(delta) * 0.02));
+    return dot(n, m) > 0.8 && abs(dot(delta, n)) <= tolerance && abs(dot(delta, m)) <= tolerance;
+}
+
+// Pack 3x7-bit normal into an exactly representable float integer. Zero is invalid.
+float PackV2DistanceNormal(float3 normal)
+{
+    uint3 q = (uint3)round(saturate(normal * 0.5 + 0.5) * 127.0);
+    return (float)(1u + q.x + (q.y << 7) + (q.z << 14));
+}
+float3 UnpackV2DistanceNormal(float packed)
+{
+    uint q = (uint)packed - 1u;
+    return normalize(float3(q & 127u, (q >> 7) & 127u, (q >> 14) & 127u) / 127.0 * 2.0 - 1.0);
+}
+#endif
+
+#ifdef _PS_V2ShadowFilter
+struct V2ShadowFilterOutput
+{
+    float Visibility : SV_Target0;
+    float4 EdgeSeed : SV_Target1;
+};
+
+// Store the boundary's WORLD position and geometric normal, not screen coordinates.
+float4 FindV2ShadowEdgeSeed(int2 pixel)
+{
+    uint width, height;
+    ShadowDistanceReceiverInput.GetDimensions(width, height);
+    float2 size = float2(width, height);
+    float4 center = GetV2CoreReceiverData(pixel);
+    if (center.w < 0.0)
+        return 0.0;
+    float depth = LightingReceiverDepth.Load(int3(pixel, 0));
+    float3 receiver = ReconstructV2Receiver(float2(pixel) + 0.5, depth, size);
+    float footprint = DistanceV2Footprint(receiver, depth, float2(pixel) + 0.5, size);
+    float4 nearest = 0.0;
+    float best = 1e30;
+    static const int2 neighbours[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
+    UNROLL
+    for (uint i = 0; i < 4; i++)
+    {
+        int2 other = pixel + neighbours[i];
+        if (any(other < 0) || any(other >= int2(width, height)))
+            continue;
+        float4 sample = GetV2CoreReceiverData(other);
+        if (sample.w < 0.0 || ((center.w < 0.5) == (sample.w < 0.5)))
+            continue;
+        float otherDepth = LightingReceiverDepth.Load(int3(other, 0));
+        float3 otherReceiver = ReconstructV2Receiver(float2(other) + 0.5, otherDepth, size);
+        if (!SameV2DistanceSurface(receiver, center.xyz, otherReceiver, sample.xyz, footprint))
+            continue;
+        float fraction = saturate((0.5 - center.w) / (sample.w - center.w));
+        float3 seed = lerp(receiver, otherReceiver, fraction);
+        float d = dot(seed - receiver, seed - receiver);
+        if (d < best)
+        {
+            best = d;
+            nearest = float4(seed, PackV2DistanceNormal(normalize(lerp(center.xyz, sample.xyz, fraction))));
+        }
+    }
+    return nearest;
+}
+
+META_PS(true, FEATURE_LEVEL_SM5)
+V2ShadowFilterOutput PS_V2ShadowFilter(float4 position : SV_Position)
+{
+    V2ShadowFilterOutput output;
+    output.Visibility = 0.0;
+    output.EdgeSeed = 0.0;
+    // Seeds must read COMPLETED filtered coverage in a separate draw, never its render target.
+    BRANCH
+    if (LightingShadowSampling.z != 0.0)
+        output.EdgeSeed = FindV2ShadowEdgeSeed(int2(position.xy));
+    else
+        output.Visibility = FilterV2ShadowVisibility(position);
+    return output;
+}
+#endif
+
+#if defined(_PS_V2ShadowDistanceJump) || defined(_PS_V2ShadowDistanceResolve)
+Texture2D<float4> ShadowDistanceSeedInput : register(t14);
+#endif
+
+#ifdef _PS_V2ShadowDistanceJump
+// JFA+1 is only the transport mechanism. Distances and surface compatibility are world-space.
+// It cannot reconstruct off-screen/hidden surfaces or provide an exact geodesic distance.
+META_PS(true, FEATURE_LEVEL_SM5)
+float4 PS_V2ShadowDistanceJump(float4 position : SV_Position) : SV_Target
+{
+    uint width, height;
+    ShadowDistanceSeedInput.GetDimensions(width, height);
+    int2 size = int2(width, height);
+    int2 pixel = int2(position.xy);
+    float4 surface = ShadowDistanceReceiverInput.Load(int3(pixel, 0));
+    if (surface.w < 0.0)
+        return 0.0;
+    float depth = LightingReceiverDepth.Load(int3(pixel, 0));
+    float3 receiver = ReconstructV2Receiver(position.xy, depth, size);
+    float footprint = DistanceV2Footprint(receiver, depth, position.xy, size);
+    int step = (int)LightingDebugOptions.z;
+    float4 nearest = 0.0;
+    float best = 1e30;
+    UNROLL
+    for (int y = -1; y <= 1; y++)
+    {
+        UNROLL
+        for (int x = -1; x <= 1; x++)
+        {
+            int2 tap = pixel + int2(x, y) * step;
+            if (any(tap < 0) || any(tap >= size))
+                continue;
+            float4 seed = ShadowDistanceSeedInput.Load(int3(tap, 0));
+            if (seed.w == 0.0)
+                continue;
+            float4 tapSurface = GetV2CoreReceiverData(tap);
+            float tapDepth = LightingReceiverDepth.Load(int3(tap, 0));
+            float3 tapReceiver = ReconstructV2Receiver(float2(tap) + 0.5, tapDepth, size);
+            if (tapSurface.w < 0.0 || !SameV2DistanceSurface(receiver, surface.xyz, tapReceiver, tapSurface.xyz, footprint) ||
+                !SameV2DistanceSurface(receiver, surface.xyz, seed.xyz, UnpackV2DistanceNormal(seed.w), footprint))
+                continue;
+            // A jump must not hop over a foreground silhouette or an empty gap.
+            int2 middle = int2((uint2(pixel) + uint2(tap)) >> 1);
+            float4 middleSurface = GetV2CoreReceiverData(middle);
+            float middleDepth = LightingReceiverDepth.Load(int3(middle, 0));
+            float3 middleReceiver = ReconstructV2Receiver(float2(middle) + 0.5, middleDepth, size);
+            if (middleSurface.w < 0.0 || !SameV2DistanceSurface(receiver, surface.xyz, middleReceiver, middleSurface.xyz, footprint))
+                continue;
+            float3 delta = seed.xyz - receiver;
+            float d = dot(delta, delta);
+            if (d < best)
+            {
+                best = d;
+                nearest = seed;
+            }
+        }
+    }
+    return nearest;
+}
+#endif
+
+#ifdef _PS_V2ShadowDistanceResolve
+struct V2ShadowDistanceOutput
+{
+    float Distance : SV_Target0;
+    float4 Debug : SV_Target1;
+};
+META_PS(true, FEATURE_LEVEL_SM5)
+V2ShadowDistanceOutput PS_V2ShadowDistanceResolve(float4 position : SV_Position)
+{
+    int3 pixel = int3(int2(position.xy), 0);
+    V2ShadowDistanceOutput output;
+    output.Distance = 0.0;
+    output.Debug = float4(0, 0, 0, 1);
+    if (LightingReceiverDepth.Load(pixel) == DEPTH_RANGE_MAX)
+        return output;
+    float4 surface = GetV2CoreReceiverData(pixel.xy);
+    if (surface.w < 0.0)
+    {
+        // Insufficient geometric depth support; never substitute a noisy material normal.
+        output.Debug = float4(0.12, 0, 0.12, 1);
+        return output;
+    }
+    uint width, height;
+    ShadowDistanceSeedInput.GetDimensions(width, height);
+    float3 receiver = ReconstructV2Receiver(position.xy, LightingReceiverDepth.Load(pixel), float2(width, height));
+    float4 seed = ShadowDistanceSeedInput.Load(pixel);
+    // No reachable boundary is an explicit finite sentinel, independent of image dimensions/range.
+    float magnitude = seed.w == 0.0 ? 1e20 : length(seed.xyz - receiver);
+    bool inside = surface.w < 0.5;
+    uint side = (uint)LightingShadowSampling.y;
+    if ((side == 1 && !inside) || (side == 2 && inside))
+    {
+        // Excluded halves do not contribute a distance ramp. Keep their sign for cel classification.
+        output.Distance = inside ? -1e20 : 1e20;
+        return output;
+    }
+    output.Distance = inside ? -magnitude : magnitude;
+    float ramp = saturate(magnitude / max(LightingDebugOptions.w, 0.001));
+    float3 tint = inside ? float3(1.0, 0.28, 0.04) : float3(0.05, 0.5, 1.0);
+    output.Debug = float4(lerp(float3(1, 1, 1), tint * 0.25, ramp), 1);
+    return output;
+}
+#endif
+
+#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowDistanceReceivers) || defined(_PS_V2ShadowMask)
 
 #include "./Flax/Math/Noise.hlsl"
 
@@ -1341,8 +1160,10 @@ float SampleV2ShadowTile(float2 uv, float depth, float3 normal, float3 uncertain
     float2 receiverTexel = uv * tile.zw - 0.5;
     float4x4 projection = tier == 0 ? LightingLightViewProjection : LightingNearLightViewProjection;
     float2 depthPerTexel = V2ShadowDepthPerTexel(normal, projection, tile.zw);
-    float bias = V2ReceiverDepthBias(LightingShadowSplit.w, depthPerTexel, tile.zw, projection, uncertainty);
-    const float noise = InterleavedGradientNoise(pixel);
+    float bias = V2LightingReceiverBias(depthPerTexel, tile.zw, projection, uncertainty);
+    // Debug comparison: fixed disk/rings by default; random rotation/radii only when requested.
+    bool jitterEnabled = LightingShadowSampling.x != 0.0;
+    float noise = jitterEnabled ? InterleavedGradientNoise(pixel) : 0.0;
     float sine, cosine;
     sincos(noise * 6.2831853, sine, cosine);
     static const float2 directions[8] = {
@@ -1358,7 +1179,7 @@ float SampleV2ShadowTile(float2 uv, float depth, float3 normal, float3 uncertain
     {
         float2 direction = directions[i];
         offsets[i] = float2(cosine * direction.x - sine * direction.y, sine * direction.x + cosine * direction.y) * LightingShadowFilter.w;
-        float radius = 0.84 + 0.16 * frac(noise + i * 0.618034);
+        float radius = jitterEnabled ? 0.84 + 0.16 * frac(noise + i * 0.618034) : 1.0;
         total += SampleV2ReceiverPlane(receiverTexel + offsets[i] * radius, receiverTexel, tile, invAtlasSize, depth, depthPerTexel, bias);
     }
     float sampleCount = 9.0;
@@ -1369,14 +1190,47 @@ float SampleV2ShadowTile(float2 uv, float depth, float3 normal, float3 uncertain
         for (uint tap = 0; tap < 8; tap++)
         {
             float jitter = frac(noise + tap * 0.381966);
-            total += SampleV2ReceiverPlane(receiverTexel + offsets[tap] * lerp(0.18, 0.55, jitter), receiverTexel, tile, invAtlasSize, depth, depthPerTexel, bias);
-            total += SampleV2ReceiverPlane(receiverTexel + offsets[tap] * lerp(0.58, 0.81, 1.0 - jitter), receiverTexel, tile, invAtlasSize, depth, depthPerTexel, bias);
+            total += SampleV2ReceiverPlane(receiverTexel + offsets[tap] * (jitterEnabled ? lerp(0.18, 0.55, jitter) : 0.35), receiverTexel, tile, invAtlasSize, depth, depthPerTexel, bias);
+            total += SampleV2ReceiverPlane(receiverTexel + offsets[tap] * (jitterEnabled ? lerp(0.58, 0.81, 1.0 - jitter) : 0.7), receiverTexel, tile, invAtlasSize, depth, depthPerTexel, bias);
         }
         sampleCount = 25.0;
     }
     return total / sampleCount;
 }
 
+#endif
+
+#ifdef _PS_V2ShadowDistanceReceivers
+// Camera depth supplies geometric receivers. The seed pass later reads completed shadow coverage.
+// Geometric normals only: albedo, normal maps, emissive and material noise are not read.
+META_PS(true, FEATURE_LEVEL_SM5)
+float4 PS_V2ShadowDistanceReceivers(float4 position : SV_Position) : SV_Target
+{
+    int2 pixel = int2(position.xy);
+    float depth = LightingReceiverDepth.Load(int3(pixel, 0));
+    if (depth == DEPTH_RANGE_MAX)
+        return float4(0, 0, 0, -1);
+    uint width, height;
+    LightingReceiverDepth.GetDimensions(width, height);
+    float2 size = float2(width, height);
+    float4 receiverH = ReconstructV2ReceiverH(position.xy, depth, size);
+    float3 receiver = receiverH.xyz / receiverH.w;
+    float2 gx = V2DepthAxisGradient(LightingReceiverDepth, depth, pixel, int2(1, 0), int2(size));
+    float2 gy = V2DepthAxisGradient(LightingReceiverDepth, depth, pixel, int2(0, 1), int2(size));
+    if (gx.y == 0.0 || gy.y == 0.0)
+        return float4(0, 0, 0, -1);
+    float4 dx = PROJECT_POINT(float4(2.0 / size.x, 0, gx.x, 0), LightingInverseViewProjection);
+    float4 dy = PROJECT_POINT(float4(0, -2.0 / size.y, gy.x, 0), LightingInverseViewProjection);
+    float3 rawNormal = cross(dx.xyz - receiver * dx.w, dy.xyz - receiver * dy.w);
+    float squared = dot(rawNormal, rawNormal);
+    if (squared <= 1e-20)
+        return float4(0, 0, 0, -1);
+    float3 normal = rawNormal * rsqrt(squared);
+    float3 toCamera = LightingIsOrthographic ? -LightingCameraForward : LightingCameraPosition - receiver;
+    normal *= dot(normal, toCamera) < 0 ? -1.0 : 1.0;
+    // Classification is deferred until jitter/filtering has completed.
+    return float4(normal, 1.0);
+}
 #endif
 
 #ifdef _PS_V2CascadeShadowMask
@@ -1435,6 +1289,15 @@ float4 PS_V2CascadeShadowMask(float4 position : SV_Position) : SV_Target
 #endif
 
 #ifdef _PS_V2DirectionalLighting
+Texture2D<float> CelShadowDistance : register(t14);
+Texture2D<float4> CelShadowReceivers : register(t15);
+
+float3 V2CelPalette(float value)
+{
+    float bands = clamp(round(LightingCelParameters.x), 2.0, 16.0);
+    float level = min(floor(saturate(value) * bands), bands - 1.0) / (bands - 1.0);
+    return lerp(float3(0.35, 0.7, 1.0), float3(0.05, 0.2, 0.9), level);
+}
 
 float SampleV2Shadow(float3 receiver, float3 normal, float3 uncertainty, float2 pixel)
 {
@@ -1459,7 +1322,7 @@ float SampleV2Shadow(float3 receiver, float3 normal, float3 uncertainty, float2 
                 float2 texel = coord.xy * tile.zw - 0.5;
                 float4x4 projection = V2LightingShadowProjection(tier);
                 float2 depthPerTexel = V2ShadowDepthPerTexel(normal, projection, tile.zw);
-                float bias = V2ReceiverDepthBias(LightingShadowSplit.w, depthPerTexel, tile.zw, projection, uncertainty);
+                float bias = V2LightingReceiverBias(depthPerTexel, tile.zw, projection, uncertainty);
                 shadow = SampleV2ReceiverPlane(texel, texel, tile, V2InvAtlasSize(), coord.z, depthPerTexel, bias);
             }
         }
@@ -1479,7 +1342,9 @@ float4 PS_V2DirectionalLighting(float4 position : SV_Position) : SV_Target
     float4 packedNormal = LightingNormals.Load(pixel);
     float3 emissive = LightingEmissive.Load(pixel).rgb;
     int shadingModel = (int)(packedNormal.a * 3.999);
-    if (shadingModel == SHADING_MODEL_UNLIT)
+    bool whiteLighting = LightingDebugOptions.x == 1.0;
+    bool celLighting = LightingDebugOptions.x == 2.0;
+    if (shadingModel == SHADING_MODEL_UNLIT && !whiteLighting && !celLighting)
         return float4(emissive, 1);
 
     float4 albedo = LightingBaseColor.Load(pixel);
@@ -1493,6 +1358,20 @@ float4 PS_V2DirectionalLighting(float4 position : SV_Position) : SV_Target
     surface.Specular = material.b;
     surface.ShadingModel = shadingModel;
 
+    // Override only the lighting inputs: geometry, normal maps and shadow visibility stay intact.
+    // Unlit and emissive materials also participate so the whole scene is comparable.
+    BRANCH
+    if (whiteLighting)
+    {
+        emissive = 0.0;
+        surface.Color = 1.0;
+        surface.AO = 1.0;
+        surface.Roughness = 1.0;
+        surface.Metalness = 0.0;
+        surface.Specular = 0.0;
+        surface.ShadingModel = SHADING_MODEL_LIT;
+    }
+
     uint width, height;
     LightingReceiverDepth.GetDimensions(width, height);
     float4 receiverH = ReconstructV2ReceiverH(position.xy, depth, float2(width, height));
@@ -1503,8 +1382,6 @@ float4 PS_V2DirectionalLighting(float4 position : SV_Position) : SV_Target
     float3 result = emissive + GetDiffuseColor(surface) * surface.AO * max(LightingAmbientIntensity, 0.0);
     if (nDotL > 0)
     {
-        float3 toEye = LightingIsOrthographic ? -LightingCameraForward : normalize(LightingCameraPosition - surface.WorldPos);
-        LightSample response = StandardShading(surface, 1.0, light, toEye, surface.Normal);
         float visibility;
         BRANCH
         if (LightingUseFilteredShadow)
@@ -1518,89 +1395,42 @@ float4 PS_V2DirectionalLighting(float4 position : SV_Position) : SV_Target
             float3 uncertainty = V2CameraDepthUncertainty(surface.WorldPos, receiverH.w, LightingInverseViewProjection);
             visibility = SampleV2Shadow(surface.WorldPos, planeNormal, uncertainty, position.xy);
         }
-        result += (response.Diffuse + response.Specular) * visibility *
+        BRANCH
+        if (celLighting)
+        {
+            float value = nDotL * saturate(visibility);
+            // Keep the outer filtered gradient; apply SDF fill only inside its opaque core.
+            BRANCH
+            if (LightingCelParameters.y != 0.0 && CelShadowReceivers.Load(pixel).w >= 0.0)
+            {
+                float distance = CelShadowDistance.Load(pixel);
+                float range = max(LightingCelParameters.z, 0.001);
+                uint side = (uint)LightingShadowSampling.y;
+                float filteredVisibility = saturate(visibility);
+                float combinedVisibility = filteredVisibility;
+                // Preserve every penumbra pixel exactly. Full SHADOW AMOUNT 1 is visibility 0.
+                // Only the opaque core receives the SDF-controlled artistic fill.
+                if (side != 2 && filteredVisibility <= 0.0 && distance < 0.0)
+                {
+                    float coreWeight = smoothstep(0.0, range, -distance);
+                    combinedVisibility = saturate(LightingCelParameters.w) * coreWeight;
+                }
+                value = nDotL * combinedVisibility;
+            }
+            return float4(V2CelPalette(value), 1);
+        }
+        float3 toEye = LightingIsOrthographic ? -LightingCameraForward : normalize(LightingCameraPosition - surface.WorldPos);
+        LightSample response = StandardShading(surface, 1.0, light, toEye, surface.Normal);
+        result += (whiteLighting ? response.Diffuse : response.Diffuse + response.Specular) * visibility *
             nDotL * LightingRadiance.rgb * max(LightingRadiance.a, 0.0);
     }
-    return float4(result, 1);
+    return float4(celLighting ? V2CelPalette(0.0) : result, 1);
 }
 
 #endif
 
 #endif
 
-#if defined(_PS_V2ShadowBlendReduce) || defined(_PS_V2ShadowBlendFilter) || defined(_PS_V2ShadowBlendCombine)
-
-Texture2D<float> ShadowBlendInput : register(t14);
-Texture2D<float> ShadowBlendLow : register(t15);
-Texture2D<float> ShadowBlendMedium : register(t16);
-
-float V2CombineShadowMasks(float a, float b, float c)
-{
-    // All inputs are shadow amounts, not depth or visibility. A constrains
-    // the silhouette, and its unfiltered contribution supplies the 1/3 floor.
-    return saturate((a + b * a + c * a) / 3.0);
-}
-
-#ifdef _PS_V2ShadowBlendReduce
-META_PS(true, FEATURE_LEVEL_SM5)
-float PS_V2ShadowBlendReduce(float4 position : SV_Position) : SV_Target
-{
-    float2 uv = position.xy * ShadowBlendParameters.xy;
-    float2 offset = ShadowBlendParameters.xy * 0.25;
-    // CPU reduction steps are at most 2:1. Four bilinear taps cover the
-    // footprint instead of sampling one point in a large source texture.
-    float value = (
-        ShadowBlendInput.SampleLevel(SamplerLinearClamp, uv + float2(-offset.x, -offset.y), 0) +
-        ShadowBlendInput.SampleLevel(SamplerLinearClamp, uv + float2(offset.x, -offset.y), 0) +
-        ShadowBlendInput.SampleLevel(SamplerLinearClamp, uv + float2(-offset.x, offset.y), 0) +
-        ShadowBlendInput.SampleLevel(SamplerLinearClamp, uv + offset, 0)) * 0.25;
-    return ShadowBlendInputVisibility != 0 ? 1.0 - value : value;
-}
-#endif
-
-#ifdef _PS_V2ShadowBlendFilter
-META_PS(true, FEATURE_LEVEL_SM5)
-float PS_V2ShadowBlendFilter(float4 position : SV_Position) : SV_Target
-{
-    uint width, height;
-    ShadowBlendInput.GetDimensions(width, height);
-    float2 uv = position.xy / float2(width, height);
-    float radius = clamp(ShadowBlendParameters.z, 0.0, 8.0);
-    float sigma = max(radius * 0.5, 0.5);
-    float sum = 0.0;
-    float totalWeight = 0.0;
-    LOOP
-    for (int tap = -8; tap <= 8; tap++)
-    {
-        float support = saturate(radius + 1.0 - abs(float(tap)));
-        if (support <= 0.0)
-            continue;
-        float weight = exp(-float(tap * tap) / (2.0 * sigma * sigma)) * support;
-        sum += ShadowBlendInput.SampleLevel(SamplerLinearClamp, uv + tap * ShadowBlendParameters.xy, 0) * weight;
-        totalWeight += weight;
-    }
-    return sum / totalWeight;
-}
-#endif
-
-#ifdef _PS_V2ShadowBlendCombine
-META_PS(true, FEATURE_LEVEL_SM5)
-float PS_V2ShadowBlendCombine(float4 position : SV_Position) : SV_Target
-{
-    float2 uv = position.xy * ShadowBlendParameters.xy;
-    float a = saturate(1.0 - ShadowBlendInput.Load(int3(int2(position.xy), 0)));
-    float b = saturate(ShadowBlendLow.SampleLevel(SamplerLinearClamp, uv, 0));
-    float c = saturate(ShadowBlendMedium.SampleLevel(SamplerLinearClamp, uv, 0));
-    float shadow = V2CombineShadowMasks(a, b, c);
-    if (ShadowBlendDebugMode == 1) return shadow;
-    if (ShadowBlendDebugMode == 2) return a;
-    if (ShadowBlendDebugMode == 3) return b;
-    if (ShadowBlendDebugMode == 4) return c;
-    return 1.0 - shadow; // Lighting consumes visibility.
-}
-#endif
-
-#endif
 
 #ifdef _CS_V2ShadowIndirectArgs
 
@@ -1641,8 +1471,7 @@ CasterBoundsDebugOutput VS_ShadowCasterBoundsDebug(uint vertex : SV_VertexID, ui
     const uint corners[24] = { 0,1, 1,3, 3,2, 2,0, 4,5, 5,7, 7,6, 6,4, 0,4, 1,5, 2,6, 3,7 };
     ShadowCasterBounds box = DebugCasterBounds[instance];
     bool selected = DebugCasterSelection[instance] != 0;
-    bool show = (box.UseProxy != 0 || (CasterDebugFlags & 32u) != 0) && (CasterDebugFlags & (selected ? 1u : 2u)) != 0 &&
-        ((CasterDebugFlags & 4u) == 0 || (box.DebugCategory & 128u) != 0);
+    bool show = box.UseProxy != 0 && (CasterDebugFlags & (selected ? 1u : 2u)) != 0;
     uint corner = corners[vertex];
     float3 cornerPosition = float3((corner & 1) ? box.Maximum.x : box.Minimum.x,
                          (corner & 2) ? box.Maximum.y : box.Minimum.y,
@@ -1661,160 +1490,6 @@ float4 PS_ShadowCasterBoundsDebug(float4 position : SV_Position, float4 color : 
 }
 #endif
 
-float3 V2TraceReasonColor(uint reason)
-{
-    if (reason == 2) return float3(0.3,0,0.4);
-    if (reason == 3) return float3(0.4,0,0);
-    if (reason == 4) return float3(0.02,0.08,0.2);
-    if (reason == 5) return float3(1,0.85,0.05);
-    if (reason == 7) return float3(0,0.6,0.9);
-    if (reason == 8) return float3(1,0.08,0.03);
-    if (reason == 9) return float3(0.05,1,0.1);
-    if (reason == 10) return float3(1,0.4,0.02);
-    if (reason == 11) return float3(0.12,0.2,0.65);
-    return float3(0.015,0.015,0.015);
-}
-
-#ifdef _PS_V2ShadowResourceDebug
-Texture2D<float4> ShadowDebugResource : register(t19);
-Texture2D<float4> ShadowDebugCameraColor : register(t20);
-StructuredBuffer<ShadowCasterBounds> ShadowDebugBounds : register(t3);
-StructuredBuffer<uint> ShadowDebugSelection : register(t18);
-META_PS(true, FEATURE_LEVEL_SM5)
-float4 PS_V2ShadowResourceDebug(float4 position : SV_Position) : SV_Target
-{
-    uint mode = (CasterDebugFlags >> 8) & 255u;
-    bool valid = (CasterDebugFlags & 65536u) != 0;
-    float2 outputSize = float2(Width, Height);
-    float2 localPosition = position.xy - SelectionReceiverRange.zw;
-    if (!valid)
-    {
-        bool checker = (((uint)localPosition.x / 16u + (uint)localPosition.y / 16u) & 1u) != 0;
-        return float4(checker ? float3(0.45, 0, 0.45) : float3(0.04, 0.04, 0.04), 1);
-    }
-    if (mode == 7)
-    {
-        bool cameraPane = localPosition.x < outputSize.x * 0.5;
-        if (abs(localPosition.x - outputSize.x * 0.5) < 1)
-            return float4(0.3, 0.3, 0.3, 1);
-        uint sourceWidth, sourceHeight;
-        if (cameraPane)
-            ShadowDebugCameraColor.GetDimensions(sourceWidth, sourceHeight);
-        else
-            ShadowDebugResource.GetDimensions(sourceWidth, sourceHeight);
-        float2 sourceSize = float2(sourceWidth, sourceHeight);
-        float2 paneSize = float2(outputSize.x * 0.5, outputSize.y);
-        float2 panePosition = localPosition - float2(cameraPane ? 0 : paneSize.x, 0);
-        float scale = min(paneSize.x / sourceSize.x, paneSize.y / sourceSize.y);
-        float2 uv = ((panePosition - paneSize * 0.5) / scale + sourceSize * 0.5) / sourceSize;
-        if (any(uv < 0) || any(uv >= 1))
-            return float4(0.025, 0.025, 0.025, 1);
-        int2 texel = min(uint2(uv * sourceSize), uint2(sourceWidth - 1, sourceHeight - 1));
-        return float4(cameraPane ? ShadowDebugCameraColor.Load(int3(texel, 0)).rgb : ShadowDebugResource.Load(int3(texel, 0)).rgb, 1);
-    }
-    uint width, height;
-    ShadowDebugResource.GetDimensions(width, height);
-    // A cascade debug snapshot uses the shared maximum-size allocation. Only
-    // the cascade's logical top-left tile was rendered; crop the display to it.
-    if (mode == 4 && (CasterDebugFlags & 131072u) != 0)
-    {
-        width = min(width, (uint)SelectionShadowTiles[0].z);
-        height = min(height, (uint)SelectionShadowTiles[0].w);
-    }
-    float2 sourceSize = float2(width, height);
-    float scale = min(outputSize.x / sourceSize.x, outputSize.y / sourceSize.y);
-    float2 uv = ((localPosition - outputSize * 0.5) / scale + sourceSize * 0.5) / sourceSize;
-    if (any(uv < 0) || any(uv >= 1))
-        return float4(0.025, 0.025, 0.025, 1);
-    float4 value = ShadowDebugResource.Load(int3(min(uint2(uv * sourceSize), uint2(width - 1, height - 1)), 0));
-#if 1 // Region: receiver trace colour conversion
-    // These are DISPLAY colours, not another depth/visibility test.
-    // The numeric probe reads the unmodified raw float4 written by the compute shader.
-    // In particular, orange in Surface Confidence is (reliable=1, positive N.L, 0),
-    // not necessarily Decision's accepted-uncertain colour.
-    if (mode >= 13 && mode <= 15)
-    {
-        int2 texel = min(uint2(uv * sourceSize), uint2(width - 1, height - 1));
-        uint coverage = CameraReceiverCoverage.Load(int3(texel,0));
-        if (coverage == 0) return float4(0.01,0.01,0.01,1);
-        if ((coverage & 2u) == 0) return float4(0.4,0.04,0.5,1); // Camera sees a back-facing receiver.
-        if (mode == 13) return float4(0.1,0.85,0.25,1);
-        float nearDepth = asfloat(CameraReceiverNear.Load(int3(texel,0)));
-        float farDepth = asfloat(CameraReceiverFar.Load(int3(texel,0)));
-        if (mode == 14)
-            return float4(saturate(nearDepth * ShadowSelectionFilterRadius / max(SelectionReceiverRange.x,1)).xxx,1);
-        float cheapDepth = value.x; // CandidateOccluderDepth is bound as the reference image.
-        if (cheapDepth == DEPTH_RANGE_MAX) return float4(0.1,0.45,1,1);
-        float blocker = DEPTH_01(cheapDepth);
-        float tolerance = SelectionShadowSplit.w * 4;
-        if (nearDepth > blocker + tolerance) return float4(1,0.18,0.05,1); // All recorded receivers behind cheap depth.
-        if (farDepth > blocker + tolerance) return float4(1,0.7,0.05,1); // Multiple depths: at least one behind.
-        return float4(0.1,0.85,0.25,1); // Receiver matches or precedes cheap light depth.
-    }
-    if (mode == 12)
-    {
-        if (ReceiverTraceStep == 0) return float4(V2TraceReasonColor((uint)value.x), 1);
-        if (value.w < 0) return float4(V2TraceReasonColor((uint)(-value.w)) * 0.35, 1);
-        float range = max(SelectionReceiverRange.y, 0.001);
-        if (ReceiverTraceStep == 1) return float4(saturate(value.y / max(SelectionReceiverRange.x, 1)).xxx, 1);
-        if (ReceiverTraceStep == 2) return float4(frac(abs(value.xyz) / range), 1);
-        if (ReceiverTraceStep == 3) return float4(value.xyz * 0.5 + 0.5, 1);
-        if (ReceiverTraceStep == 4) return float4(saturate(0.5 + value.xyz / range * 0.5), 1);
-        if (ReceiverTraceStep == 5) return float4(value.xyz, 1);
-        if (ReceiverTraceStep == 6 || ReceiverTraceStep == 7)
-            return float4(saturate(value.x / range), saturate(1 - abs(value.x) / range) * 0.2, saturate(-value.x / range), 1);
-        if (ReceiverTraceStep == 8) return float4(saturate(value.xyz / range), 1);
-        if (ReceiverTraceStep == 9) return float4(value.x, saturate(value.y), saturate(-value.y), 1);
-        uint mask = (uint)value.y;
-        float2 quad = frac(uv * sourceSize * 0.5);
-        uint tap = (quad.x >= 0.5 ? 1u : 0u) + (quad.y >= 0.5 ? 2u : 0u);
-        return float4((mask & (1u << tap)) != 0 ? float3(0.1,1,0.2) : float3(0.5,0.03,0.02), 1);
-    }
-#endif // Region: receiver trace colour conversion
-    if (mode == 8 || mode == 10)
-        return float4(value.rgb, 1);
-    if (mode == 2)
-        return float4(value.xyz, 1); // Raw encoded GBuffer normals.
-    if (mode == 5)
-        return float4(value.rrr, 1); // White = lit, black = shadow.
-    if (value.r == DEPTH_RANGE_MAX)
-        return float4(0.12, 0, 0.16, 1); // No recorded surface.
-    float gray;
-    if (mode == 1)
-    {
-        float2 ndc = uv * float2(2, -2) + float2(-1, 1);
-        float4 receiver = PROJECT_POINT(float4(ndc, value.r, 1), InverseViewProjection);
-        float distance = length(receiver.xyz / receiver.w - SelectionCameraPosition.xyz);
-        gray = 1 - saturate(distance / max(SelectionReceiverRange.x, 0.001));
-    }
-    else
-    {
-#if REVERSE_Z
-        gray = value.r;
-#else
-        gray = 1 - value.r;
-#endif
-    }
-    return float4(gray.xxx, 1);
-}
-#endif
-
-#ifdef _PS_V2LightPOVShaded
-Texture2D<float> LightPOVDebugDepth : register(t2);
-Texture2D<float4> LightPOVDebugNormals : register(t8);
-Texture2D<float4> LightPOVDebugAlbedo : register(t9);
-META_PS(true, FEATURE_LEVEL_SM5)
-float4 PS_V2LightPOVShaded(float4 position : SV_Position) : SV_Target
-{
-    int2 pixel = int2(position.xy);
-    if (LightPOVDebugDepth.Load(int3(pixel, 0)) == DEPTH_RANGE_MAX)
-        return float4(0.025, 0.025, 0.025, 1);
-    float3 normal = normalize(LightPOVDebugNormals.Load(int3(pixel, 0)).xyz * 2 - 1);
-    float3 albedo = LightPOVDebugAlbedo.Load(int3(pixel, 0)).rgb;
-    float diffuse = saturate(dot(normal, DirectionToLight));
-    return float4(albedo * (0.15 + 0.85 * diffuse), 1);
-}
-#endif
 
 #ifdef _CS_V2LightCasterVisibility
 Texture2D<float> LightVisibilityDepth : register(t7);
@@ -1906,76 +1581,46 @@ void CS_V2LightCasterVisibility(uint3 group : SV_GroupID, uint thread : SV_Group
 }
 #endif
 
-#ifdef _VS_V2ShadowProxyDepth
-StructuredBuffer<ShadowCasterBounds> ProxyCasterBounds : register(t3);
-StructuredBuffer<uint> ProxyLightVisibility : register(t21);
-META_VS(true, FEATURE_LEVEL_SM5)
-float4 VS_V2ShadowProxyDepth(uint vertex : SV_VertexID, uint instance : SV_InstanceID) : SV_Position
-{
-    const uint corners[36] = {0,2,1,1,2,3,4,5,6,5,7,6,0,1,4,1,5,4,2,6,3,3,6,7,0,4,2,2,4,6,1,3,5,3,7,5};
-    ShadowCasterBounds box = ProxyCasterBounds[instance];
-    uint c = corners[vertex];
-    float3 corner = float3((c & 1) ? box.Maximum.x : box.Minimum.x,
-        (c & 2) ? box.Maximum.y : box.Minimum.y, (c & 4) ? box.Maximum.z : box.Minimum.z);
-    return box.UseProxy && ProxyLightVisibility[instance] != 0 ?
-        PROJECT_POINT(float4(corner, 1), LightViewProjection) : float4(0, 0, -1, 1);
-}
-#endif
-
-#ifdef _PS_V2ReceiverDepthCross
-Texture2D<float> CrossCameraDepth : register(t2);
-Texture2D<float> CrossProxyDepth : register(t22);
-Texture2D<float4> CrossReceiverNormals : register(t8);
+// Derive lower-resolution light depth without rerendering any geometry.
+// Nearest-blocker reduction is conservative: ordinary and reversed depth use
+// opposite extrema. Depth values must never be averaged across silhouettes.
+#ifdef _PS_V2ShadowDepthReduce
+Texture2D<float> ReductionSourceDepth : register(t7);
 META_PS(true, FEATURE_LEVEL_SM5)
-float4 PS_V2ReceiverDepthCross(float4 position : SV_Position) : SV_Target
+float PS_V2ShadowDepthReduce(float4 position : SV_Position) : SV_Depth
 {
-    uint2 sourceSize; CrossCameraDepth.GetDimensions(sourceSize.x, sourceSize.y);
-    float2 uv = position.xy / float2(Width, Height);
-    int2 sourcePixel = min(uint2(uv * sourceSize), sourceSize - 1);
-    uv = (float2(sourcePixel) + 0.5) / sourceSize;
-    float depth = CrossCameraDepth.Load(int3(sourcePixel, 0));
-    if (depth == DEPTH_RANGE_MAX) return float4(0.12, 0, 0.16, 1);
-    float4 world = PROJECT_POINT(float4(uv * float2(2,-2) + float2(-1,1), depth, 1), InverseViewProjection);
-    float3 coord = ProjectV2Shadow(world.xyz / world.w, LightViewProjection);
-    if (!IsV2ShadowCoordValid(coord)) return float4(0.5,0.5,0.5,1);
-    uint2 mapSize; CrossProxyDepth.GetDimensions(mapSize.x, mapSize.y);
-    float3 normal = HasReceiverNormals ? normalize(CrossReceiverNormals.Load(int3(sourcePixel, 0)).xyz * 2 - 1) : 0;
-    if (HasReceiverNormals)
+    uint2 ReductionTargetSize = uint2(OcclusionWidth,OcclusionHeight);
+    uint2 sourceSize;
+    ReductionSourceDepth.GetDimensions(sourceSize.x, sourceSize.y);
+    uint2 pixel = uint2(position.xy);
+    uint2 first, last;
+    // Uniform branch: avoid divisions for the normal 2:1 power-of-two chain.
+    if (all(sourceSize == ReductionTargetSize * 2))
     {
-        float4 plane = V2ReceiverPlaneNormalChecked(CrossCameraDepth, world.xyz / world.w, depth, sourcePixel, sourceSize,
-            InverseViewProjection, normal);
-        normal = plane.xyz;
-        if (plane.w != 0 && dot(normal, DirectionToLight) < -0.0001)
-            return float4(0.12, 0.12, 0.12, 1); // A back face is not a direct-light shadow receiver.
+        first = pixel * 2;
+        last = first + 2;
     }
-    float3 surfaceCoord = coord;
-    // Displace the probe without treating a point inside the receiver as a new surface.
-    coord = ProjectV2Shadow(world.xyz / world.w - normal * SelectionReceiverBias, LightViewProjection);
-    if (!IsV2ShadowCoordValid(coord)) return float4(0.5, 0.5, 0.5, 1);
-    float2 slope = HasReceiverNormals ? V2ShadowDepthPerTexel(normal, LightViewProjection, mapSize) : 0;
-    coord.z = surfaceCoord.z + dot(slope, (coord.xy - surfaceCoord.xy) * mapSize);
-    float3 uncertainty = V2CameraDepthUncertainty(world.xyz / world.w, world.w, InverseViewProjection);
-    float bias = V2ReceiverDepthBias(SelectionShadowSplit.w, slope, mapSize, LightViewProjection, uncertainty);
-    float2 receiverTexel = coord.xy * mapSize - 0.5;
-    int2 first = int2(floor(receiverTexel));
-    bool shadow = false;
-    UNROLL
-    for (uint tap = 0; tap < 4; tap++)
+    else
     {
-        int2 texel = clamp(first + int2(tap & 1, tap >> 1), 0, int2(mapSize) - 1);
-        float blocker = CrossProxyDepth.Load(int3(texel, 0));
-        float receiverDepth = coord.z + dot(slope, texel - receiverTexel);
-        shadow = shadow || (blocker != DEPTH_RANGE_MAX && DEPTH_DIFF(receiverDepth, blocker) > bias);
+        // Non-power-of-two footprints may overlap a third source texel.
+        first = (pixel * sourceSize) / ReductionTargetSize;
+        last = min(((pixel + 1) * sourceSize + ReductionTargetSize - 1) / ReductionTargetSize, sourceSize);
     }
-    return shadow ? float4(1,0.25,0.02,1) : float4(0.04,0.35,0.7,1);
-}
+    float result = DEPTH_RANGE_MAX;
+    LOOP
+    for (uint y = first.y; y < last.y; y++)
+    {
+        LOOP
+        for (uint x = first.x; x < last.x; x++)
+        {
+            float sampleDepth = ReductionSourceDepth.Load(int3(x,y,0));
+#if REVERSE_Z
+            result = max(result,sampleDepth);
+#else
+            result = min(result,sampleDepth);
 #endif
-
-#ifdef _PS_V2ReceiverTraceProbe
-Texture2D<float4> ReceiverTraceProbeSource : register(t19);
-META_PS(true, FEATURE_LEVEL_SM5)
-float4 PS_V2ReceiverTraceProbe(float4 position : SV_Position) : SV_Target
-{
-    return ReceiverTraceProbeSource.Load(int3(int2(SelectionCameraForward.xy), 0));
+        }
+    }
+    return result;
 }
 #endif

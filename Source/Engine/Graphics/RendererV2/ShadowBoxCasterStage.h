@@ -8,7 +8,6 @@
 #include "Engine/Core/Math/Color.h"
 #include "Engine/Core/Math/Vector4.h"
 
-class FontAsset;
 class FrustumCullStage;
 class OcclusionCullStage;
 class Shader;
@@ -17,7 +16,6 @@ class GPUDevice;
 class GPUTexture;
 class GPUPipelineState;
 class RenderBuffers;
-class RenderPipelineDrawStage;
 class RenderPipelineGraphicSettings;
 
 /// <summary>Selects directional shadow casters using projected world-space bounds.</summary>
@@ -34,7 +32,6 @@ private:
     int32 LastRejectedProxyCount = 0;
     int32 LastProxyCasterCount = 0;
     int32 LastSelectionDispatchCount = 0;
-    int32 LastSelectionTierCount = 0;
     int32 LastCascadeCount = 0;
     int32 LastReceiverWidth = 0;
     int32 LastReceiverHeight = 0;
@@ -46,40 +43,31 @@ private:
     GPUBuffer* IndirectInputs = nullptr;
     GPUBuffer* IndirectOutput = nullptr;
     GPUBuffer* IndirectArguments = nullptr;
-    GPUTexture* DebugMask = nullptr;
     GPUTexture* CandidateOccluderDepth = nullptr;
     GPUBuffer* LightVisibilityBuffer = nullptr;
-    GPUTexture* ProxyShadowDepth = nullptr;
     GPUTexture* CameraReceiverMask = nullptr;
     GPUTexture* CameraReceiverNear = nullptr;
     GPUTexture* CameraReceiverFar = nullptr;
     GPUBuffer* CameraReceiverCasters = nullptr;
     GPUTexture* CameraReceiverTileMax = nullptr;
-    // Optional diagnostic resources; normal rendering never reads these back.
-    GPUTexture* SelectionStepDebug = nullptr;
-    GPUTexture* ReceiverTrace = nullptr;
-    GPUTexture* ReceiverTraceProbe = nullptr;
-    GPUTexture* ReceiverTraceReadback = nullptr;
-    GPUPipelineState* ReceiverTraceProbeState = nullptr;
-    AssetReference<FontAsset> ReceiverTraceFont;
-    Float4 ReceiverTraceValue = Float4::Zero;
-    double ReceiverTraceNextRead = 0;
-    GPUPipelineState* ProxyDepthState = nullptr;
-    GPUPipelineState* DepthCrossDebugState = nullptr;
     // One geometry-depth target shared by every radial shadow band.
     GPUTexture* SharedCascadeDepth = nullptr;
     int32 SharedCascadeRequestedResolution = 0;
+    // Cached derived depth maps. They share the source projection, not another geometry draw.
+    struct BandDepthMap
+    {
+        GPUTexture* Texture = nullptr;
+        // Maximum selected-sample displacement from the output texel centre, in UV.
+        Float2 ReceiverFootprint = Float2::Zero;
+    };
+    Array<BandDepthMap> BandDepthMaps;
+    GPUPipelineState* DepthReductionState = nullptr;
+    Float2 GetBandDepthFootprint(const GPUTexture* depth) const;
+    GPUTexture* GetBandDepth(GPUContext* context, GPUTexture* source, int32 resolution, Array<GPUTexture*>& usedMaps);
     RenderBuffers* LightDepthBuffers = nullptr;
     int32 RequestedAtlasWidth = 0;
     int32 RequestedAtlasHeight = 0;
-    GPUPipelineState* DebugState = nullptr;
     GPUPipelineState* CasterBoundsDebugState = nullptr;
-    GPUPipelineState* ResourceDebugState = nullptr;
-    RenderPipelineDrawStage* LightDebugDrawStage = nullptr;
-    GPUTexture* LightDebugColor = nullptr;
-    GPUTexture* LightDebugShadedColor = nullptr;
-    GPUPipelineState* LightDebugShadingState = nullptr;
-    GPUTexture* ResourceDebugComposite = nullptr;
     GPUPipelineState* ResolveState = nullptr;
     GPUPipelineState* ShadowMaskState = nullptr;
     GPUPipelineState* CascadeMaskState = nullptr;
@@ -88,14 +76,13 @@ private:
     GPUPipelineState* ShadowFilterState = nullptr;
     GPUTexture* ShadowMask = nullptr;
     GPUTexture* FilteredShadowMask = nullptr;
-    GPUPipelineState* BlendReduceState = nullptr;
-    GPUPipelineState* BlendFilterState = nullptr;
-    GPUPipelineState* BlendCombineState = nullptr;
-    Array<GPUTexture*> BlendPyramid;
-    GPUTexture* BlendBlurTemp[2] = {};
-    GPUTexture* BlendFiltered[2] = {};
-    GPUTexture* BlendResult = nullptr;
-    bool BuildShadowMaskBlend(GPUContext* context, GPUTexture* visibility, const RenderPipelineGraphicSettings* settings);
+    GPUPipelineState* ShadowDistanceReceiverState = nullptr;
+    GPUTexture* ShadowDistanceReceivers = nullptr;
+    GPUPipelineState* ShadowDistanceJumpState = nullptr;
+    GPUPipelineState* ShadowDistanceResolveState = nullptr;
+    GPUTexture* ShadowDistanceSeeds[2] = {};
+    GPUTexture* ShadowDistance = nullptr;
+    GPUTexture* ShadowDistanceDebug = nullptr;
     void OnShaderReloading(Asset* asset);
     int32 PrepareShadowAtlas(GPUDevice* device, int32 resolution, int32 farTileWidth);
     bool PrepareSharedShadowDepth(GPUDevice* device, const RenderPipelineGraphicSettings* settings);
@@ -104,9 +91,6 @@ public:
 
     /// <summary>Meshes above this triangle count use a box for GPU caster selection.</summary>
     API_FIELD() int32 ProxyTriangleThreshold = 4096;
-
-    /// <summary>Overlays camera pixels reached by an expensive caster's box.</summary>
-    API_FIELD() bool ShowReceiverHits = false;
 
     /// <summary>Draws green wire boxes for expensive casters accepted by the potential-receiver test.</summary>
     API_FIELD() bool ShowSelectedExpensiveCasters = false;
@@ -171,9 +155,6 @@ public:
 
     /// <summary>Height of the camera-depth input used for receiver selection.</summary>
     API_PROPERTY() int32 GetReceiverHeight() const { return LastReceiverHeight; }
-
-    /// <summary>Conservative full-screen pixel-test budget including both legacy atlas tiers when present. Not a measured GPU hit or sample count.</summary>
-    API_PROPERTY() uint64 GetSelectionPixelBudget() const { return (uint64)LastProxyCasterCount * LastReceiverWidth * LastReceiverHeight * LastSelectionTierCount; }
 
     /// <summary>Whether the last shadow draw consumed the GPU selection results.</summary>
     API_PROPERTY() bool GetUsedSelection() const { return LastUsedSelection; }
