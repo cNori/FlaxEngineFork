@@ -142,7 +142,7 @@ float V2ShadowTierWeight(float3 coord, float viewDepth, float2 split, float2 til
     return borderWeight * (1.0 - smoothstep(split.x, split.y, viewDepth));
 }
 
-#if defined(_CS_V2ProjectCameraReceivers) || defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowDistanceReceivers)
+#if defined(_CS_V2ProjectCameraReceivers) || defined(_PS_V2DirectionalLighting) || defined(_PS_V2CascadeShadowMask)
 // Receiver-plane correction: how much LIGHT device depth changes for one light-map texel.
 // Inputs: unit world-space normal, world-to-light clip matrix, light-map size in texels.
 // Output: (depth change per +X texel, depth change per +Y texel), not world distance.
@@ -159,7 +159,7 @@ float2 V2ShadowDepthPerTexel(float3 normal, float4x4 lightProjection, float2 siz
     float3 y = float3(lightProjection[0][1], lightProjection[1][1], lightProjection[2][1]);
     float3 z = float3(lightProjection[0][2], lightProjection[1][2], lightProjection[2][2]);
     float normalZ = dot(normal, z);
-    if (abs(normalZ) <= 0.02 * length(z) * length(normal))
+    if (abs(normalZ) <= 1e-6 * length(z) * length(normal))
         return 0;
     float2 plane = float2(-2.0 * dot(normal, x) / dot(x, x), 2.0 * dot(normal, y) / dot(y, y));
     return plane * (dot(z, z) / normalZ) / size;
@@ -229,11 +229,9 @@ float4 V2ReceiverPlaneNormalChecked(Texture2D<float> depthTexture, float3 receiv
     float lengthSquared = dot(planeNormal, planeNormal);
     float agreement = dot(planeNormal, shadingNormal);
     // At a silhouette the quad may straddle two surfaces.
-    // With a unit shading normal, agreement^2 / lengthSquared is cos(angle)^2.
-    // Require |cos(angle)| >= 0.6; then flip the plane normal to the GBuffer side.
-    // A mixed-surface fit can still pass this threshold. That is what the
-    // Surface Confidence and Surface Normal debug views expose.
-    if (lengthSquared <= 0 || agreement * agreement < 0.36 * lengthSquared)
+    // Depth extrapolation above validates the plane. Use the shading normal
+    // only to orient it; normal-map detail must not replace a valid geometric slope.
+    if (lengthSquared <= 1e-20)
         return float4(shadingNormal, 0);
     return float4(planeNormal * ((agreement < 0 ? -1.0 : 1.0) * rsqrt(lengthSquared)), 1);
 }
@@ -671,7 +669,7 @@ void CS_V2DepthOcclusion(uint3 group : SV_GroupID, uint thread : SV_GroupIndex)
 
 #endif
 
-#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowDistanceReceivers) || defined(_PS_V2ShadowFilter) || defined(_PS_V2ShadowDistanceJump) || defined(_PS_V2ShadowDistanceResolve)
+#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2CascadeShadowMask)
 
 #include "./Flax/Lighting/Lighting.hlsl"
 
@@ -692,9 +690,8 @@ float4 LightingShadowSplit;
 float4 LightingCascadeRange; // Inner radius, fade start radius, outer radius.
 float4 LightingCascadeParameters; // Normal bias in world units, cascade index, debug enabled, screen filter radius.
 float4 LightingReductionFootprint; // XY: maximum reduced-sample displacement in normalized UV.
-float4 LightingDebugOptions; // X: lighting mode (0 material, 1 white, 2 cel, 3 blocker distance), Y: distance field requested, Z: jump step, W: distance debug range (world centimeters).
-float4 LightingCelParameters; // X: band count, Y: use receiver SDF, Z: world distance range, W: core fill strength.
-float4 LightingShadowSampling; // X: adaptive jitter, Y: SDF side (0 both, 1 inner, 2 outer), Z: seed-only filter pass, W: world-origin noise phase.
+float4 LightingDebugOptions; // X: lighting mode (0 material, 1 white, 3 blocker distance, 4 contact, 5 blur bands); W: blocker display range in centimeters.
+float4 LightingShadowSampling; // X: adaptive jitter; W: world-origin noise phase.
 float4x4 LightingCameraViewProjection;
 float4 LightingBlockerParameters; // X: legacy PCSS flag, Y: blur band count, Z: full light-map resolution.
 float4 LightingContactParameters; // World length, thickness, camera fade distance, reserved.
@@ -742,7 +739,7 @@ float4 V2NearShadowSample(float3 receiver)
         LightingShadowTiles[1].zw, LightingShadowFilter.w));
 }
 
-#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowDistanceReceivers)
+#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2CascadeShadowMask)
 float2 V2InvAtlasSize()
 {
     uint width, height;
@@ -897,7 +894,7 @@ float V2PCSSVisibility(float2 receiverTexel, float depth, float2 gradient, float
 
 #endif
 
-#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2ShadowMask) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowDistanceReceivers)
+#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2CascadeShadowMask)
 
 // Also use the adaptive filter when a legacy view needs an explicit mask.
 float SampleV2ShadowTile(float2 uv, float depth, float3 normal, float3 uncertainty, float2 pixel, uint tier);
@@ -939,350 +936,20 @@ float V2RawShadow(float3 coord, float3 normal, float3 uncertainty, uint tier)
     float2 gradient = V2ShadowDepthPerTexel(normal, projection, tile.zw);
     float bias = V2LightingReceiverBias(gradient, tile.zw, projection, uncertainty);
     float blocker = LightingLightDepth.Load(int3(int2(tile.xy + texel), 0));
-    float gap = DEPTH_DIFF(coord.z + dot(gradient, texel - receiverTexel), blocker);
+    // DEPTH_DIFF does not parenthesize its arguments in reversed depth.
+    float receiverDepth = coord.z + dot(gradient, texel - receiverTexel);
+    float gap = DEPTH_DIFF(receiverDepth, blocker);
     return blocker == DEPTH_RANGE_MAX || gap <= bias ? 1.0 : 0.0;
 }
 
 float2 V2ResolveBlur(float3 receiver, float3 coord, float3 normal, float3 uncertainty, float2 pixel, uint tier);
 
-#ifdef _PS_V2ShadowMask
-
-META_PS(true, FEATURE_LEVEL_SM5)
-float2 PS_V2ShadowMask(float4 position : SV_Position) : SV_Target
-{
-    int3 pixel = int3(int2(position.xy), 0);
-    float depth = LightingReceiverDepth.Load(pixel);
-    if (depth == DEPTH_RANGE_MAX)
-        return float2(1, 0.5);
-
-    uint width, height;
-    LightingReceiverDepth.GetDimensions(width, height);
-    float4 receiverH = ReconstructV2ReceiverH(position.xy, depth, float2(width, height));
-    float3 receiver = receiverH.xyz / receiverH.w;
-    float3 uncertainty = V2CameraDepthUncertainty(receiver, receiverH.w, LightingInverseViewProjection);
-    float4 nearSample = V2NearShadowSample(receiver);
-    if (LightingBlockerParameters.w != 0) nearSample.w = nearSample.w >= 0.5 ? 1.0 : 0.0;
-    float3 normal = V2ReceiverPlaneNormal(LightingReceiverDepth, receiver, depth, pixel.xy, float2(width, height),
-        LightingInverseViewProjection, DecodeNormal(LightingNormals.Load(pixel).xyz));
-    float2 farMask = float2(1, 0.5);
-    if (nearSample.w < 1.0)
-    {
-        float3 coord = ProjectV2Shadow(receiver, LightingLightViewProjection);
-        if (IsV2ShadowCoordValid(coord))
-            farMask = LightingBlockerParameters.w != 0 ? float2(V2RawShadow(coord, normal, uncertainty, 0), 0.5) : LightingBlockerParameters.y > 0 ? V2ResolveBlur(receiver, coord, normal, uncertainty, position.xy, 0) : LightingShadowFilter.w > 0
-                ? float2(SampleV2ShadowTile(coord.xy, coord.z, normal, uncertainty, position.xy, 0), 0.5)
-                : SampleV2MaskTile(receiver, normal, uncertainty, coord, 0);
-    }
-    if (nearSample.w <= 0.0)
-        return farMask;
-    float2 nearMask = LightingBlockerParameters.w != 0 ? float2(V2RawShadow(nearSample.xyz, normal, uncertainty, 1), 0.5) : LightingBlockerParameters.y > 0 ? V2ResolveBlur(receiver, nearSample.xyz, normal, uncertainty, position.xy, 1) : LightingShadowFilter.w > 0
-        ? float2(SampleV2ShadowTile(nearSample.xy, nearSample.z, normal, uncertainty, position.xy, 1), 0.5)
-        : SampleV2MaskTile(receiver, normal, uncertainty, nearSample.xyz, 1);
-    return LightingBlockerParameters.w != 0 ? (nearSample.w >= 0.5 ? nearMask : farMask) : lerp(farMask, nearMask, nearSample.w);
-}
 
 #endif
 
-#endif
 
-#ifdef _PS_V2ShadowFilter
 
-float FilterV2ShadowVisibility(float4 position)
-{
-    int2 pixel = int2(position.xy);
-    float depth = LightingReceiverDepth.Load(int3(pixel, 0));
-    if (depth == DEPTH_RANGE_MAX)
-        return 1.0;
-
-    uint width, height;
-    RawShadowMask.GetDimensions(width, height);
-    int2 size = int2(width, height);
-    float2 center = RawShadowMask.Load(int3(pixel, 0));
-    // Adaptive and hard bands carry a half-pixel support. Their interiors
-    // already contain the final shadow result and need no screen-space blur.
-    if (LightingCascadeRange.w != 0.0 && center.y <= 0.5)
-        return center.x;
-    static const int2 offsets[12] = {
-        int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1),
-        int2(-1, -1), int2(1, -1), int2(-1, 1), int2(1, 1),
-        int2(-3, 0), int2(3, 0), int2(0, -3), int2(0, 3)
-    };
-
-    float2 samples[12];
-    bool edge = false;
-    UNROLL
-    for (uint i = 0; i < 12; i++)
-    {
-        int2 samplePixel = pixel + offsets[i];
-        samples[i] = RawShadowMask.Load(int3(clamp(samplePixel, 0, size - 1), 0));
-        edge = edge || samples[i].x != center.x;
-    }
-    if (!edge)
-        return center.x;
-
-    float3 receiver = ReconstructV2Receiver(position.xy, depth, size);
-    float3 normal = DecodeNormal(LightingNormals.Load(int3(pixel, 0)).xyz);
-    float planeTolerance = 1.5 / max(V2PixelsPerWorldUnit(receiver), 0.0001);
-    float visibility = center.x;
-    float totalWeight = 1.0;
-    UNROLL
-    for (uint tap = 0; tap < 12; tap++)
-    {
-        int2 samplePixel = pixel + offsets[tap];
-        if (any(samplePixel < 0) || any(samplePixel >= size))
-            continue;
-        float2 sampleMask = samples[tap];
-        float distance = length(float2(offsets[tap]));
-        float radius = LightingCascadeRange.w != 0.0 ? center.y : max(center.y, sampleMask.y);
-        float weight = saturate(1.0 - distance / (radius + 0.5));
-        if (weight <= 0)
-            continue;
-        float sampleDepth = LightingReceiverDepth.Load(int3(samplePixel, 0));
-        if (sampleDepth == DEPTH_RANGE_MAX)
-            continue;
-        float3 sampleNormal = DecodeNormal(LightingNormals.Load(int3(samplePixel, 0)).xyz);
-        if (dot(normal, sampleNormal) < 0.9)
-            continue;
-        float3 sampleReceiver = ReconstructV2Receiver(float2(samplePixel) + 0.5, sampleDepth, size);
-        // Compare against the receiver plane so grazing angles on a flat floor still filter.
-        if (abs(dot(sampleReceiver - receiver, normal)) > planeTolerance)
-            continue;
-        visibility += sampleMask.x * weight;
-        totalWeight += weight;
-    }
-    return visibility / totalWeight;
-}
-
-#endif
-
-#if defined(_PS_V2ShadowFilter) || defined(_PS_V2ShadowDistanceJump) || defined(_PS_V2ShadowDistanceResolve)
-// RGB = geometric receiver normal; A = filtered shadow coverage, -1 = unreliable/background.
-Texture2D<float4> ShadowDistanceReceiverInput : register(t15);
-
-// Geometry validity is separate from shadow classification. The red/core region is
-// shadow amount 1, i.e. VISIBILITY 0 after filtering; penumbra pixels remain outside.
-float4 GetV2CoreReceiverData(int2 pixel)
-{
-    float4 receiver = ShadowDistanceReceiverInput.Load(int3(pixel, 0));
-    if (receiver.w >= 0.0)
-        receiver.w = FilteredShadowMask.Load(int3(pixel, 0)) <= 0.0 ? 0.0 : 1.0;
-    return receiver;
-}
-
-float DistanceV2Footprint(float3 receiver, float depth, float2 pixel, float2 size)
-{
-    float3 x = ReconstructV2Receiver(pixel + float2(1, 0), depth, size) - receiver;
-    float3 y = ReconstructV2Receiver(pixel + float2(0, 1), depth, size) - receiver;
-    return max(max(length(x), length(y)), 0.001);
-}
-
-// Compare geometry in world/origin-relative space, never material shading normals.
-// Plane tolerance permits quantization and gentle curvature, but rejects depth layers.
-bool SameV2DistanceSurface(float3 p, float3 n, float3 q, float3 m, float footprint)
-{
-    float3 delta = q - p;
-    float agreement = clamp(dot(n, m), -1.0, 1.0);
-    // A curved receiver is not one infinite plane. Normal rotation bounds its
-    // expected departure from the endpoint tangent planes. Parallel depth layers
-    // get no curvature allowance, so a wall/foreground jump still fails.
-    float curvature = sqrt(max(0.0, 2.0 * (1.0 - agreement)));
-    float tolerance = max(0.005, footprint * 0.25 + length(delta) * curvature);
-    return agreement > 0.5 && abs(dot(delta, n)) <= tolerance && abs(dot(delta, m)) <= tolerance;
-}
-
-// Pack 3x7-bit normal into an exactly representable float integer. Zero is invalid.
-float PackV2DistanceNormal(float3 normal)
-{
-    uint3 q = (uint3)round(saturate(normal * 0.5 + 0.5) * 127.0);
-    return (float)(1u + q.x + (q.y << 7) + (q.z << 14));
-}
-float3 UnpackV2DistanceNormal(float packed)
-{
-    uint q = (uint)packed - 1u;
-    return normalize(float3(q & 127u, (q >> 7) & 127u, (q >> 14) & 127u) / 127.0 * 2.0 - 1.0);
-}
-#endif
-
-#ifdef _PS_V2ShadowFilter
-struct V2ShadowFilterOutput
-{
-    float Visibility : SV_Target0;
-    float4 EdgeSeed : SV_Target1;
-};
-
-// Store the boundary's WORLD position and geometric normal, not screen coordinates.
-float4 FindV2ShadowEdgeSeed(int2 pixel)
-{
-    uint width, height;
-    ShadowDistanceReceiverInput.GetDimensions(width, height);
-    float2 size = float2(width, height);
-    float4 center = GetV2CoreReceiverData(pixel);
-    if (center.w < 0.0)
-        return 0.0;
-    float depth = LightingReceiverDepth.Load(int3(pixel, 0));
-    float3 receiver = ReconstructV2Receiver(float2(pixel) + 0.5, depth, size);
-    float footprint = DistanceV2Footprint(receiver, depth, float2(pixel) + 0.5, size);
-    float4 nearest = 0.0;
-    float best = 1e30;
-    static const int2 neighbours[4] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
-    UNROLL
-    for (uint i = 0; i < 4; i++)
-    {
-        int2 other = pixel + neighbours[i];
-        if (any(other < 0) || any(other >= int2(width, height)))
-            continue;
-        float4 sample = GetV2CoreReceiverData(other);
-        if (sample.w < 0.0 || ((center.w < 0.5) == (sample.w < 0.5)))
-            continue;
-        float otherDepth = LightingReceiverDepth.Load(int3(other, 0));
-        float3 otherReceiver = ReconstructV2Receiver(float2(other) + 0.5, otherDepth, size);
-        if (!SameV2DistanceSurface(receiver, center.xyz, otherReceiver, sample.xyz, footprint))
-            continue;
-        float fraction = saturate((0.5 - center.w) / (sample.w - center.w));
-        float3 seed = lerp(receiver, otherReceiver, fraction);
-        float d = dot(seed - receiver, seed - receiver);
-        if (d < best)
-        {
-            best = d;
-            nearest = float4(seed, PackV2DistanceNormal(normalize(lerp(center.xyz, sample.xyz, fraction))));
-        }
-    }
-    return nearest;
-}
-
-META_PS(true, FEATURE_LEVEL_SM5)
-V2ShadowFilterOutput PS_V2ShadowFilter(float4 position : SV_Position)
-{
-    V2ShadowFilterOutput output;
-    output.Visibility = 0.0;
-    output.EdgeSeed = 0.0;
-    // Seeds must read COMPLETED filtered coverage in a separate draw, never its render target.
-    BRANCH
-    if (LightingShadowSampling.z != 0.0)
-        output.EdgeSeed = FindV2ShadowEdgeSeed(int2(position.xy));
-    else
-        output.Visibility = FilterV2ShadowVisibility(position);
-    return output;
-}
-#endif
-
-#if defined(_PS_V2ShadowDistanceJump) || defined(_PS_V2ShadowDistanceResolve)
-Texture2D<float4> ShadowDistanceSeedInput : register(t14);
-#endif
-
-#ifdef _PS_V2ShadowDistanceJump
-// JFA+1 is only the transport mechanism. Distances and surface compatibility are world-space.
-// It cannot reconstruct off-screen/hidden surfaces or provide an exact geodesic distance.
-META_PS(true, FEATURE_LEVEL_SM5)
-float4 PS_V2ShadowDistanceJump(float4 position : SV_Position) : SV_Target
-{
-    uint width, height;
-    ShadowDistanceSeedInput.GetDimensions(width, height);
-    int2 size = int2(width, height);
-    int2 pixel = int2(position.xy);
-    float4 surface = ShadowDistanceReceiverInput.Load(int3(pixel, 0));
-    if (surface.w < 0.0)
-        return 0.0;
-    float depth = LightingReceiverDepth.Load(int3(pixel, 0));
-    float3 receiver = ReconstructV2Receiver(position.xy, depth, size);
-    float footprint = DistanceV2Footprint(receiver, depth, position.xy, size);
-    int step = (int)LightingDebugOptions.z;
-    // A valid seed already owned by this receiver is never discarded by a later jump.
-    // Previously even the centre candidate was re-tested through quantized-normal gates.
-    float4 nearest = ShadowDistanceSeedInput.Load(int3(pixel, 0));
-    float3 retainedDelta = nearest.xyz - receiver;
-    float best = nearest.w != 0.0 ? dot(retainedDelta, retainedDelta) : 1e30;
-    UNROLL
-    for (int y = -1; y <= 1; y++)
-    {
-        UNROLL
-        for (int x = -1; x <= 1; x++)
-        {
-            int2 tap = pixel + int2(x, y) * step;
-            if (any(tap < 0) || any(tap >= size))
-                continue;
-            float4 seed = ShadowDistanceSeedInput.Load(int3(tap, 0));
-            if (seed.w == 0.0)
-                continue;
-            float4 tapSurface = GetV2CoreReceiverData(tap);
-            float tapDepth = LightingReceiverDepth.Load(int3(tap, 0));
-            float3 tapReceiver = ReconstructV2Receiver(float2(tap) + 0.5, tapDepth, size);
-            if (tapSurface.w < 0.0 || !SameV2DistanceSurface(receiver, surface.xyz, tapReceiver, tapSurface.xyz, footprint) ||
-                !SameV2DistanceSurface(receiver, surface.xyz, seed.xyz, UnpackV2DistanceNormal(seed.w), footprint))
-                continue;
-            // A jump must not hop over a foreground silhouette or an empty gap.
-            int2 middle = int2((uint2(pixel) + uint2(tap)) >> 1);
-            float4 middleSurface = GetV2CoreReceiverData(middle);
-            float middleDepth = LightingReceiverDepth.Load(int3(middle, 0));
-            float3 middleReceiver = ReconstructV2Receiver(float2(middle) + 0.5, middleDepth, size);
-            if (middleSurface.w < 0.0 || !SameV2DistanceSurface(receiver, surface.xyz, middleReceiver, middleSurface.xyz, footprint))
-                continue;
-            float3 delta = seed.xyz - receiver;
-            float d = dot(delta, delta);
-            bool stableTie = d == best && (seed.x < nearest.x ||
-                (seed.x == nearest.x && (seed.y < nearest.y || (seed.y == nearest.y && seed.z < nearest.z))));
-            if (d < best || stableTie)
-            {
-                best = d;
-                nearest = seed;
-            }
-        }
-    }
-    return nearest;
-}
-#endif
-
-#ifdef _PS_V2ShadowDistanceResolve
-struct V2ShadowDistanceOutput
-{
-    float Distance : SV_Target0;
-    float4 Debug : SV_Target1;
-};
-META_PS(true, FEATURE_LEVEL_SM5)
-V2ShadowDistanceOutput PS_V2ShadowDistanceResolve(float4 position : SV_Position)
-{
-    int3 pixel = int3(int2(position.xy), 0);
-    V2ShadowDistanceOutput output;
-    output.Distance = 0.0;
-    output.Debug = float4(0, 0, 0, 1);
-    if (LightingReceiverDepth.Load(pixel) == DEPTH_RANGE_MAX)
-        return output;
-    float4 surface = GetV2CoreReceiverData(pixel.xy);
-    if (surface.w < 0.0)
-    {
-        // Insufficient geometric depth support; never substitute a noisy material normal.
-        output.Debug = float4(0.12, 0, 0.12, 1);
-        return output;
-    }
-    uint width, height;
-    ShadowDistanceSeedInput.GetDimensions(width, height);
-    float3 receiver = ReconstructV2Receiver(position.xy, LightingReceiverDepth.Load(pixel), float2(width, height));
-    float4 seed = ShadowDistanceSeedInput.Load(pixel);
-    float magnitude = length(seed.xyz - receiver);
-    bool inside = surface.w < 0.5;
-    uint side = (uint)LightingShadowSampling.y;
-    if ((side == 1 && !inside) || (side == 2 && inside))
-    {
-        // Excluded halves do not contribute a distance ramp. Keep their sign for cel classification.
-        output.Distance = inside ? -1e20 : 1e20;
-        return output;
-    }
-    if (seed.w == 0.0)
-    {
-        // Unavailable is not a very large valid distance. Mark it distinctly and never fill from it.
-        output.Distance = inside ? -1e30 : 1e30;
-        output.Debug = float4(0.5, 0.0, 0.5, 1);
-        return output;
-    }
-    output.Distance = inside ? -magnitude : magnitude;
-    float ramp = saturate(magnitude / max(LightingDebugOptions.w, 0.001));
-    float3 tint = inside ? float3(1.0, 0.28, 0.04) : float3(0.05, 0.5, 1.0);
-    output.Debug = float4(lerp(float3(1, 1, 1), tint * 0.25, ramp), 1);
-    return output;
-}
-#endif
-
-#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2CascadeShadowMask) || defined(_PS_V2ShadowDistanceReceivers) || defined(_PS_V2ShadowMask)
+#if defined(_PS_V2DirectionalLighting) || defined(_PS_V2CascadeShadowMask)
 
 #include "./Flax/Math/Noise.hlsl"
 
@@ -1302,19 +969,33 @@ float SampleV2ShadowTileSettings(float2 uv, float depth, float3 normal, float3 u
     BRANCH
     if (jitterEnabled)
     {
-        uint receiverWidth, receiverHeight;
-        LightingReceiverDepth.GetDimensions(receiverWidth, receiverHeight);
-        float receiverDepth = LightingReceiverDepth.Load(int3(int2(pixel), 0));
-        float3 receiver = ReconstructV2Receiver(pixel, receiverDepth, float2(receiverWidth, receiverHeight));
-        float2 worldAnchor = float2(receiver.x + receiver.y * 0.754877666, receiver.z + receiver.y * 0.569840296);
-        float phase = dot(worldAnchor, float2(0.06711056, 0.00583715)) + LightingShadowSampling.w;
-        noise = frac(52.9829189 * frac(phase));
+        // Camera-depth reconstruction must not steer the sampling pattern.
+        // Integer light texels give stable, decorrelated rotations at a fixed map location.
+        uint2 cell = (uint2)max(floor(receiverTexel), 0.0);
+        uint hash = cell.x * 0x8da6b343u ^ cell.y * 0xd8163841u;
+        hash ^= hash >> 16;
+        hash *= 0x7feb352du;
+        hash ^= hash >> 15;
+        noise = (hash & 0x00ffffffu) * (1.0 / 16777216.0);
     }
     float sine = 0.0, cosine = 1.0;
     sincos(noise * 6.2831853, sine, cosine);
     BRANCH
     if (pcss)
         return V2PCSSVisibility(receiverTexel, depth, depthPerTexel, bias, tile, invAtlasSize, projection, float2(cosine, sine), radiusSetting, angularTangent, suppliedGap);
+    // Large kernels use an irregular disk instead of concentric eight-spoke rings.
+    // Keep every sample on the same receiver plane and preserve the requested radius.
+    if (radiusSetting > 1.0)
+    {
+        float visibility = 0.0;
+        LOOP
+        for (uint tap = 0; tap < 32; tap++)
+        {
+            float2 offset = V2RotateBlockerTap(V2BlockerDisk[tap], float2(cosine, sine)) * radiusSetting;
+            visibility += SampleV2ReceiverPlane(receiverTexel + offset, receiverTexel, tile, invAtlasSize, depth, depthPerTexel, bias);
+        }
+        return visibility / 32.0;
+    }
     static const float2 directions[8] = {
         float2(1, 0), float2(0.7071068, 0.7071068), float2(0, 1), float2(-0.7071068, 0.7071068),
         float2(-1, 0), float2(-0.7071068, -0.7071068), float2(0, -1), float2(0.7071068, -0.7071068)
@@ -1460,38 +1141,6 @@ float2 V2ResolveBlur(float3 receiver, float3 coord, float3 normal, float3 uncert
 
 #endif
 
-#ifdef _PS_V2ShadowDistanceReceivers
-// Camera depth supplies geometric receivers. The seed pass later reads completed shadow coverage.
-// Geometric normals only: albedo, normal maps, emissive and material noise are not read.
-META_PS(true, FEATURE_LEVEL_SM5)
-float4 PS_V2ShadowDistanceReceivers(float4 position : SV_Position) : SV_Target
-{
-    int2 pixel = int2(position.xy);
-    float depth = LightingReceiverDepth.Load(int3(pixel, 0));
-    if (depth == DEPTH_RANGE_MAX)
-        return float4(0, 0, 0, -1);
-    uint width, height;
-    LightingReceiverDepth.GetDimensions(width, height);
-    float2 size = float2(width, height);
-    float4 receiverH = ReconstructV2ReceiverH(position.xy, depth, size);
-    float3 receiver = receiverH.xyz / receiverH.w;
-    float2 gx = V2DepthAxisGradient(LightingReceiverDepth, depth, pixel, int2(1, 0), int2(size));
-    float2 gy = V2DepthAxisGradient(LightingReceiverDepth, depth, pixel, int2(0, 1), int2(size));
-    if (gx.y == 0.0 || gy.y == 0.0)
-        return float4(0, 0, 0, -1);
-    float4 dx = PROJECT_POINT(float4(2.0 / size.x, 0, gx.x, 0), LightingInverseViewProjection);
-    float4 dy = PROJECT_POINT(float4(0, -2.0 / size.y, gy.x, 0), LightingInverseViewProjection);
-    float3 rawNormal = cross(dx.xyz - receiver * dx.w, dy.xyz - receiver * dy.w);
-    float squared = dot(rawNormal, rawNormal);
-    if (squared <= 1e-20)
-        return float4(0, 0, 0, -1);
-    float3 normal = rawNormal * rsqrt(squared);
-    float3 toCamera = LightingIsOrthographic ? -LightingCameraForward : LightingCameraPosition - receiver;
-    normal *= dot(normal, toCamera) < 0 ? -1.0 : 1.0;
-    // Classification is deferred until jitter/filtering has completed.
-    return float4(normal, 1.0);
-}
-#endif
 
 #ifdef _PS_V2CascadeShadowMask
 
@@ -1585,16 +1234,6 @@ float4 PS_V2CascadeShadowMask(float4 position : SV_Position) : SV_Target
 #endif
 
 #ifdef _PS_V2DirectionalLighting
-Texture2D<float> CelShadowDistance : register(t14);
-Texture2D<float4> CelShadowReceivers : register(t15);
-
-float3 V2CelPalette(float value)
-{
-    float bands = clamp(round(LightingCelParameters.x), 2.0, 16.0);
-    float level = min(floor(saturate(value) * bands), bands - 1.0) / (bands - 1.0);
-    return lerp(float3(0.35, 0.7, 1.0), float3(0.05, 0.2, 0.9), level);
-}
-
 float SampleV2Shadow(float3 receiver, float3 normal, float3 uncertainty, float2 pixel)
 {
     float4 nearSample = V2NearShadowSample(receiver);
@@ -1761,8 +1400,7 @@ float4 PS_V2DirectionalLighting(float4 position : SV_Position) : SV_Target
     float3 emissive = LightingEmissive.Load(pixel).rgb;
     int shadingModel = (int)(packedNormal.a * 3.999);
     bool whiteLighting = LightingDebugOptions.x == 1.0;
-    bool celLighting = LightingDebugOptions.x == 2.0;
-    if (shadingModel == SHADING_MODEL_UNLIT && !whiteLighting && !celLighting)
+    if (shadingModel == SHADING_MODEL_UNLIT && !whiteLighting)
         return float4(emissive, 1);
 
     float4 albedo = LightingBaseColor.Load(pixel);
@@ -1819,42 +1457,12 @@ float4 PS_V2DirectionalLighting(float4 position : SV_Position) : SV_Target
         if (visibility > 0.0)
             contactVisibility = V2ContactVisibility(surface.WorldPos, float2(width, height));
         visibility = min(visibility, contactVisibility);
-        BRANCH
-        if (celLighting)
-        {
-            float value = nDotL * saturate(visibility);
-            // Keep the outer filtered gradient; apply SDF fill only inside its opaque core.
-            BRANCH
-            if (LightingCelParameters.y != 0.0 && CelShadowReceivers.Load(pixel).w >= 0.0 &&
-                abs(CelShadowDistance.Load(pixel)) < 1e29)
-            {
-                float distance = CelShadowDistance.Load(pixel);
-                float range = max(LightingCelParameters.z, 0.001);
-                uint side = (uint)LightingShadowSampling.y;
-                float filteredVisibility = saturate(visibility);
-                float combinedVisibility = filteredVisibility;
-                // Keep the jitter curve's shape while moving its shadow-end height to the SDF join.
-                // Core fill then DECREASES with inward distance, rather than brightening the deep core.
-                if (side != 2)
-                {
-                    float joinVisibility = saturate(LightingCelParameters.w);
-                    combinedVisibility = lerp(joinVisibility, 1.0, filteredVisibility);
-                    if (filteredVisibility <= 0.0 && distance < 0.0)
-                    {
-                        float inwardWeight = smoothstep(0.0, range, -distance);
-                        combinedVisibility = joinVisibility * (1.0 - inwardWeight);
-                    }
-                }
-                value = nDotL * min(combinedVisibility, contactVisibility);
-            }
-            return float4(V2CelPalette(value), 1);
-        }
         float3 toEye = LightingIsOrthographic ? -LightingCameraForward : normalize(LightingCameraPosition - surface.WorldPos);
         LightSample response = StandardShading(surface, 1.0, light, toEye, surface.Normal);
         result += (whiteLighting ? response.Diffuse : response.Diffuse + response.Specular) * visibility *
             nDotL * LightingRadiance.rgb * max(LightingRadiance.a, 0.0);
     }
-    return float4(celLighting ? V2CelPalette(0.0) : result, 1);
+    return float4(result, 1);
 }
 
 #endif

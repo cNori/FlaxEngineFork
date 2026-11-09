@@ -163,9 +163,8 @@ namespace
         Float4 CascadeRange;
         Float4 CascadeParameters; // Normal bias in world units, cascade index, debug enabled, screen filter radius.
         Float4 ReductionFootprint; // XY: reduced depth sample support in normalized light-map UV.
-        Float4 DebugOptions; // X: lighting mode (0 material, 1 white, 2 cel), Y: edge seeds, Z: jump step, W: debug range.
-        Float4 CelParameters; // X: band count, Y: receiver SDF enabled, Z: world distance range, W: core fill strength.
-        Float4 ShadowSampling; // X: adaptive sampling jitter, Y: SDF side (0 both, 1 inner, 2 outer), Z: seed-only pass, W: world-origin noise phase.
+        Float4 DebugOptions; // X: lighting/debug mode; W: blocker-distance display range.
+        Float4 ShadowSampling; // X: adaptive sampling jitter; other components reserved.
         Matrix CameraViewProjection; // World -> camera clip for contact shadows.
         Float4 BlockerParameters; // X: PCSS enabled; other components reserved.
         Float4 ContactParameters; // World length, thickness, camera fade distance, reserved.
@@ -211,22 +210,11 @@ ShadowBoxCasterStage::~ShadowBoxCasterStage()
     SAFE_DELETE_GPU_RESOURCE(CasterBoundsDebugState);
     SAFE_DELETE_GPU_RESOURCE(ResolveState);
     SAFE_DELETE_GPU_RESOURCE(BlurBandSettings);
-    SAFE_DELETE_GPU_RESOURCE(ShadowMaskState);
     SAFE_DELETE_GPU_RESOURCE(CascadeMaskState);
     SAFE_DELETE_GPU_RESOURCE(PixelCascadeMaskState);
     SAFE_DELETE_GPU_RESOURCE(CascadeDebugState);
     SAFE_DELETE_GPU_RESOURCE(CascadeDebug);
-    SAFE_DELETE_GPU_RESOURCE(ShadowFilterState);
-    SAFE_DELETE_GPU_RESOURCE(ShadowDistanceReceiverState);
-    SAFE_DELETE_GPU_RESOURCE(ShadowDistanceReceivers);
-    SAFE_DELETE_GPU_RESOURCE(ShadowDistanceJumpState);
-    SAFE_DELETE_GPU_RESOURCE(ShadowDistanceResolveState);
-    for (auto& seed : ShadowDistanceSeeds)
-        SAFE_DELETE_GPU_RESOURCE(seed);
-    SAFE_DELETE_GPU_RESOURCE(ShadowDistance);
-    SAFE_DELETE_GPU_RESOURCE(ShadowDistanceDebug);
     SAFE_DELETE_GPU_RESOURCE(ShadowMask);
-    SAFE_DELETE_GPU_RESOURCE(FilteredShadowMask);
     SAFE_DELETE_GPU_RESOURCE(SelectionReadback);
     SAFE_DELETE_GPU_RESOURCE(IndirectInputs);
     SAFE_DELETE_GPU_RESOURCE(IndirectOutput);
@@ -256,22 +244,12 @@ void ShadowBoxCasterStage::OnShaderReloading(Asset* asset)
         CasterBoundsDebugState->ReleaseGPU();
     if (ResolveState)
         ResolveState->ReleaseGPU();
-    if (ShadowMaskState)
-        ShadowMaskState->ReleaseGPU();
     if (CascadeMaskState)
         CascadeMaskState->ReleaseGPU();
     if (PixelCascadeMaskState)
         PixelCascadeMaskState->ReleaseGPU();
     if (CascadeDebugState)
         CascadeDebugState->ReleaseGPU();
-    if (ShadowFilterState)
-        ShadowFilterState->ReleaseGPU();
-    if (ShadowDistanceReceiverState)
-        ShadowDistanceReceiverState->ReleaseGPU();
-    if (ShadowDistanceJumpState)
-        ShadowDistanceJumpState->ReleaseGPU();
-    if (ShadowDistanceResolveState)
-        ShadowDistanceResolveState->ReleaseGPU();
 }
 
 void ShadowBoxCasterStage::SetProjection(const Vector3& lightDirection, float distance)
@@ -373,7 +351,6 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     const bool smoothShadows = !settings || settings->ShadowRendering == ShadowRenderingMode::Smooth;
     const bool adaptiveFilter = smoothShadows;
     const float adaptiveRadius = 8.0f;
-    const bool screenSpaceFilter = false;
     const float angularRadius = 0.27f;
     const bool indirectShadowDraws = settings ? settings->UseIndirectShadowDraws : UseIndirectShadowDraws;
     const bool cascadeDebugRequested = settings && !settings->ShadowCascades.IsEmpty() && settings->ShowShadowCascades;
@@ -470,9 +447,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     struct CascadeFilter
     {
         float AdaptiveRadius;
-        float ScreenRadius;
         float AngularTangent;
-        bool PCSS;
     };
     Array<CascadeFilter, InlinedAllocation<8>> cascadeFilters;
     float maxNormalBias = 0.0f;
@@ -482,16 +457,13 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         {
             CascadeFilter filter;
             filter.AdaptiveRadius = smoothShadows ? Math::Clamp(cascade.FilterRadius, 0.0f, 32.0f) : 0.0f;
-            filter.ScreenRadius = 0.0f;
             filter.AngularTangent = Math::Tan(angularRadius * DegreesToRadians);
-            filter.PCSS = false;
             cascadeFilters.Add(filter);
             filterRadius = Math::Max(filterRadius, filter.AdaptiveRadius);
             maxNormalBias = Math::Max(maxNormalBias, Math::Clamp(cascade.NormalBias, 0.0f, 10.0f));
         }
     }
     Array<BlurBandData, InlinedAllocation<8>> blurBands;
-    bool blurNeedsScreenFilter = false;
     if (settings && smoothShadows)
     {
         float previousEnd = 0, previousFade = 0;
@@ -1072,21 +1044,8 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     resolve.DirectionToLight = data.DirectionToLight;
     resolve.AmbientIntensity = AmbientIntensity;
     resolve.ShadowSampling.X = smoothShadows ? 1.0f : 0.0f;
-    resolve.ShadowSampling.Y = settings ? (float)(int32)settings->DistanceFieldSide : 0.0f;
-    // Keep jitter attached to world receivers even if WorldWarp changes the local origin.
-    if (view->Source)
-    {
-        auto* source = view->Source->GetIC_Source();
-        const auto* sourcePose = source ? static_cast<const Transform*>(source->GetIC_WorldTransform()) : nullptr;
-        if (sourcePose)
-        {
-            const Vector3 origin = sourcePose->Translation - view->LocalTransform.Translation;
-            const double phase = ((double)origin.X + (double)origin.Y * (double)0.754877666f) * (double)0.06711056f +
-                ((double)origin.Z + (double)origin.Y * (double)0.569840296f) * (double)0.00583715f;
-            resolve.ShadowSampling.W = (float)(phase - Math::Floor(phase));
-        }
-    }
-    resolve.DebugOptions.X = settings && settings->ShowCelShading ? 2.0f :
+    resolve.ShadowSampling.Y = 0.0f;
+    resolve.DebugOptions.X = 
         settings && settings->ShowWhiteSurfaceLighting ? 1.0f : 0.0f;
     resolve.CameraViewProjection = data.ViewProjection;
     resolve.BlockerParameters = Float4(0.0f, (float)blurBands.Count(), (float)resolution, smoothShadows ? 0.0f : 1.0f);
@@ -1137,13 +1096,8 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     const bool blockerDebugRequested = settings && settings->ShowBlockerDistance && !showCascadeDebug && !blurDebugRequested;
     const bool showCascadeVisualization = showCascadeDebug || (useConfiguredCascades && (blockerDebugRequested || blurDebugRequested));
     const bool contactDebugRequested = smoothShadows && settings && settings->ShowContactShadows && !showCascadeDebug && !blurDebugRequested && !blockerDebugRequested;
-    const bool distanceDebugRequested = smoothShadows && settings && settings->ShowShadowDistanceField && !showCascadeDebug && !blurDebugRequested && !blockerDebugRequested && !contactDebugRequested;
-    bool distanceDebugReady = false;
-    const bool celRequested = settings && settings->ShowCelShading && !showCascadeDebug && !blurDebugRequested && !blockerDebugRequested && !contactDebugRequested;
-    bool needsScreenFilter = blurNeedsScreenFilter;
     GPUTexture* visibilityTexture = nullptr;
-    // Shared resolve body; cel invokes it only AFTER the distance field is complete.
-    const auto drawLightingResolve = [&](bool cel)
+    const auto drawLightingResolve = [&]()
     {
         auto* baseColor = resources.Get<GPUTexture>(TEXT("Scene.BaseColor"));
         auto* material = resources.Get<GPUTexture>(TEXT("Scene.Material"));
@@ -1154,7 +1108,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         context->SetViewportAndScissors((float)sceneColor->Width(), (float)sceneColor->Height());
         context->SetRenderTarget(sceneColor->View());
         resolve.UseFilteredShadow = visibilityTexture != nullptr;
-        resolve.DebugOptions.X = blurDebugRequested ? 5.0f : blockerDebugRequested ? 3.0f : contactDebugRequested ? 4.0f : cel ? 2.0f : settings && settings->ShowWhiteSurfaceLighting ? 1.0f : 0.0f;
+        resolve.DebugOptions.X = blurDebugRequested ? 5.0f : blockerDebugRequested ? 3.0f : contactDebugRequested ? 4.0f : settings && settings->ShowWhiteSurfaceLighting ? 1.0f : 0.0f;
         if (blockerDebugRequested || blurDebugRequested)
         {
             // The final resolve samples the full geometry depth, never a reduced band.
@@ -1167,8 +1121,6 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
             resolve.DebugOptions.W = Math::Max(settings->BlockerDistanceDisplayRange, 0.01f);
 
         }
-        resolve.CelParameters = Float4(settings ? (float)Math::Clamp(settings->CelShadingBands, 2, 16) : 2.0f,
-            cel && distanceDebugReady ? 1.0f : 0.0f, settings ? settings->ShadowDistanceDisplayRange : 32.0f, settings ? Math::Clamp(settings->ShadowFillStrength, 0.0f, 1.0f) : 0.5f);
         context->UpdateCB(resolveConstants, &resolve);
         context->BindCB(3, resolveConstants);
         context->BindSR(2, depth);
@@ -1183,11 +1135,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
             context->BindSR(13, visibilityTexture);
             resources.SetOutput(TEXT("Shadow.Visibility"), visibilityTexture);
         }
-        if (cel && distanceDebugReady)
-        {
-            context->BindSR(14, ShadowDistance);
-            context->BindSR(15, ShadowDistanceReceivers);
-        }
+
         context->SetState(ResolveState);
         context->DrawFullscreenTriangle();
         context->ResetRenderTarget();
@@ -1393,8 +1341,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                         cascadeResolve.ShadowFilter.X = maximum.Z - minimum.Z;
                         cascadeResolve.ShadowFilter.Z = slice.Filter.AngularTangent;
                         cascadeResolve.ShadowFilter.W = slice.Filter.AdaptiveRadius;
-                        cascadeResolve.BlockerParameters.X = slice.Filter.PCSS ? 1.0f : 0.0f;
-                        if (blurBands.IsEmpty()) needsScreenFilter |= slice.Filter.ScreenRadius > 0.5f;
+                        cascadeResolve.BlockerParameters.X = 0.0f;
                         cascadeResolve.CascadeRange = slice.Range;
                         if (blurDebugRequested)
                             cascadeResolve.DebugOptions.X = 5.0f;
@@ -1406,7 +1353,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                             cascadeResolve.DebugOptions.W = Math::Max(settings->BlockerDistanceDisplayRange, 0.01f);
                         }
                         cascadeResolve.CascadeParameters = Float4(data.CameraPosition.W, slice.Parameters.Z,
-                            showCascadeDebug ? (blurDebugRequested ? 2.0f : 1.0f) : 0.0f, slice.Filter.ScreenRadius);
+                            showCascadeDebug ? (blurDebugRequested ? 2.0f : 1.0f) : 0.0f, 0.0f);
                         context->UpdateCB(resolveConstants, &cascadeResolve);
                         context->BindCB(3, resolveConstants);
                         context->BindSR(2, depth);
@@ -1448,144 +1395,8 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
             }
             if (ResolveState && ResolveState->IsValid())
             {
-                const bool distanceReady = distanceDebugRequested &&
-                    preparePass(ShadowDistanceReceiverState, ShadowDistanceReceivers, "PS_V2ShadowDistanceReceivers", TEXT("V2 Shadow Distance Receivers"), PixelFormat::R16G16B16A16_Float) &&
-                    preparePass(ShadowDistanceJumpState, ShadowDistanceSeeds[0], "PS_V2ShadowDistanceJump", TEXT("V2 Shadow Distance Seeds A"), PixelFormat::R32G32B32A32_Float) &&
-                    preparePass(ShadowDistanceJumpState, ShadowDistanceSeeds[1], "PS_V2ShadowDistanceJump", TEXT("V2 Shadow Distance Seeds B"), PixelFormat::R32G32B32A32_Float) &&
-                    preparePass(ShadowDistanceResolveState, ShadowDistance, "PS_V2ShadowDistanceResolve", TEXT("V2 Shadow Distance"), PixelFormat::R32_Float) &&
-                    preparePass(ShadowDistanceResolveState, ShadowDistanceDebug, "PS_V2ShadowDistanceResolve", TEXT("V2 Shadow Distance Debug"), PixelFormat::R8G8B8A8_UNorm);
-                resolve.DebugOptions.Y = distanceReady ? 1.0f : 0.0f;
-                resolve.DebugOptions.W = settings ? settings->ShadowDistanceDisplayRange : 32.0f;
-                const bool applyScreenFilter = distanceReady || (useConfiguredCascades ? needsScreenFilter : blurBands.HasItems() ? blurNeedsScreenFilter : filterRadius == 0 && screenSpaceFilter);
-                if (applyScreenFilter &&
-                    (useConfiguredCascades ? visibilityTexture != nullptr :
-                        preparePass(ShadowMaskState, ShadowMask, "PS_V2ShadowMask", TEXT("V2 Shadow Mask"), PixelFormat::R16G16_Float)) &&
-                    preparePass(ShadowFilterState, FilteredShadowMask, "PS_V2ShadowFilter", TEXT("V2 Filtered Shadow Mask"), PixelFormat::R16_Float))
-                {
-                    if (distanceReady)
-                    {
-                        PROFILE_GPU_CPU_NAMED("V2 Shadow Distance Receiver Geometry");
-                        ResolveConstants distanceResolve = resolve;
-                        // Cascades changed data after the original resolve constants were built.
-                        // Cross camera receivers against the actual full-resolution shared depth projection.
-                        distanceResolve.LightViewProjection = data.LightViewProjection;
-                        distanceResolve.ShadowTiles[0] = data.ShadowTiles[0];
-                        distanceResolve.ShadowSplit.W = GetShadowDepthPrecisionBias(lightDepth->Format());
-                        distanceResolve.ReductionFootprint = Float4::Zero;
-                        distanceResolve.ShadowFilter.W = 0.0f; // Geometry only; core classification follows the completed filter.
-                        context->ResetSR();
-                        context->UpdateCB(resolveConstants, &distanceResolve);
-                        context->BindCB(3, resolveConstants);
-                        context->BindSR(2, depth);
-                        context->BindSR(7, lightDepth);
-                        context->SetViewportAndScissors((float)depth->Width(), (float)depth->Height());
-                        context->SetRenderTarget(ShadowDistanceReceivers->View());
-                        context->SetState(ShadowDistanceReceiverState);
-                        context->DrawFullscreenTriangle();
-                        context->ResetRenderTarget();
-                        context->ResetSR();
-                    }
-                    context->UpdateCB(resolveConstants, &resolve);
-                    context->BindCB(3, resolveConstants);
-                    context->BindSR(2, depth);
-                    context->BindSR(8, receiverNormals);
-                    context->SetViewportAndScissors((float)depth->Width(), (float)depth->Height());
-                    if (!useConfiguredCascades)
-                    {
-                        PROFILE_GPU_CPU_NAMED("V2 Shadow Mask");
-                        if (BlurBandSettings) context->BindSR(0, BlurBandSettings->View());
-                        context->BindSR(7, lightDepth);
-                        context->SetRenderTarget(ShadowMask->View());
-                        context->SetState(ShadowMaskState);
-                        context->DrawFullscreenTriangle();
-                        context->ResetRenderTarget();
-                    }
-                    {
-                        PROFILE_GPU_CPU_NAMED("V2 Shadow Filter");
-                        context->BindSR(12, ShadowMask);
-                        context->SetRenderTarget(FilteredShadowMask->View());
-                        context->SetState(ShadowFilterState);
-                        context->DrawFullscreenTriangle();
-                        context->ResetRenderTarget();
-                    }
-                    visibilityTexture = FilteredShadowMask;
-                    if (distanceReady)
-                    {
-                        PROFILE_GPU_CPU_NAMED("V2 Shadow Distance Field");
-                        context->ResetSR();
-                        {
-                            PROFILE_GPU_CPU_NAMED("V2 Shadow Core Seeds");
-                            resolve.ShadowSampling.Z = 1.0f;
-                            context->UpdateCB(resolveConstants, &resolve);
-                            context->BindCB(3, resolveConstants);
-                            context->BindSR(2, depth);
-                            context->BindSR(13, FilteredShadowMask);
-                            context->BindSR(15, ShadowDistanceReceivers);
-                            // Target 0 is scratch; target 1 stores seeds. Scratch is overwritten by JFA.
-                            GPUTextureView* seedTargets[] = { ShadowDistanceSeeds[1]->View(), ShadowDistanceSeeds[0]->View() };
-                            context->SetRenderTarget(nullptr, ToSpan(seedTargets, 2));
-                            context->SetState(ShadowFilterState);
-                            context->DrawFullscreenTriangle();
-                            context->ResetRenderTarget();
-                            context->ResetSR();
-                            resolve.ShadowSampling.Z = 0.0f;
-                        }
-                        int32 step = 1;
-                        while (step < Math::Max(depth->Width(), depth->Height()))
-                            step *= 2;
-                        int32 source = 0;
-                        // One extra unit-step refinement after the logarithmic jump sequence (JFA+1).
-                        for (step /= 2; step >= 1; step /= 2)
-                        {
-                            resolve.DebugOptions.Z = (float)step;
-                            context->UpdateCB(resolveConstants, &resolve);
-                            context->BindSR(14, ShadowDistanceSeeds[source]);
-                            context->BindSR(2, depth);
-                            context->BindSR(15, ShadowDistanceReceivers);
-                            context->BindSR(13, FilteredShadowMask);
-                            context->SetRenderTarget(ShadowDistanceSeeds[1 - source]->View());
-                            context->SetState(ShadowDistanceJumpState);
-                            context->DrawFullscreenTriangle();
-                            context->ResetRenderTarget();
-                            context->ResetSR();
-                            source = 1 - source;
-                        }
-                        resolve.DebugOptions.Z = 1.0f;
-                        context->UpdateCB(resolveConstants, &resolve);
-                        context->BindSR(14, ShadowDistanceSeeds[source]);
-                        context->BindSR(2, depth);
-                        context->BindSR(15, ShadowDistanceReceivers);
-                        context->BindSR(13, FilteredShadowMask);
-                        context->SetRenderTarget(ShadowDistanceSeeds[1 - source]->View());
-                        context->SetState(ShadowDistanceJumpState);
-                        context->DrawFullscreenTriangle();
-                        context->ResetRenderTarget();
-                        context->ResetSR();
-                        source = 1 - source;
-                        context->BindSR(2, depth);
-                        context->BindSR(12, ShadowMask);
-                        context->BindSR(14, ShadowDistanceSeeds[source]);
-                        context->BindSR(2, depth);
-                        context->BindSR(15, ShadowDistanceReceivers);
-                        context->BindSR(13, FilteredShadowMask);
-                        GPUTextureView* targets[] = { ShadowDistance->View(), ShadowDistanceDebug->View() };
-                        context->SetRenderTarget(nullptr, ToSpan(targets, 2));
-                        context->SetState(ShadowDistanceResolveState);
-                        context->DrawFullscreenTriangle();
-                        context->ResetRenderTarget();
-                        context->ResetSR();
-                        resources.SetOutput(TEXT("Shadow.SignedDistance"), ShadowDistance);
-                        resources.SetOutput(TEXT("Shadow.DistanceReceivers"), ShadowDistanceReceivers);
-                        resources.SetOutput(TEXT("Shadow.DistanceDebug"), ShadowDistanceDebug);
-                        distanceDebugReady = true;
-                    }
-                }
-
-                if (!celRequested)
-                {
-                    PROFILE_GPU_CPU_NAMED("V2 Shadow Lighting Resolve");
-                    drawLightingResolve(false);
-                }
+                PROFILE_GPU_CPU_NAMED("V2 Shadow Lighting Resolve");
+                drawLightingResolve();
             }
         }
     }
@@ -1601,33 +1412,6 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     {
         resources.Set(TEXT("Shadow.Depth"), publishedDepth);
         resources.SetOutput(TEXT("Shadow.Depth"), publishedDepth);
-    }
-
-    if (distanceDebugReady && !celRequested)
-    {
-        PROFILE_GPU_CPU_NAMED("V2 Shadow Distance Debug");
-        context->ResetRenderTarget();
-        context->ResetSR();
-        context->SetViewportAndScissors((float)sceneColor->Width(), (float)sceneColor->Height());
-        context->Draw(sceneColor, ShadowDistanceDebug);
-        context->ResetRenderTarget();
-        context->ResetSR();
-        resources.SetOutput(TEXT("Shadow.DistanceDebug"), ShadowDistanceDebug);
-    }
-    else if (!distanceDebugRequested)
-    {
-        // Debug off has no extra GPU passes and releases the full-resolution work textures.
-        for (auto& seed : ShadowDistanceSeeds)
-            SAFE_DELETE_GPU_RESOURCE(seed);
-        SAFE_DELETE_GPU_RESOURCE(ShadowDistance);
-        SAFE_DELETE_GPU_RESOURCE(ShadowDistanceDebug);
-        SAFE_DELETE_GPU_RESOURCE(ShadowDistanceReceivers);
-    }
-
-    if (celRequested)
-    {
-        PROFILE_GPU_CPU_NAMED("V2 Cel Shading Resolve");
-        drawLightingResolve(true);
     }
 
     if (cascadeDebugReady)

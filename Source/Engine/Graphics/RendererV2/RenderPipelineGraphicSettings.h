@@ -64,17 +64,6 @@ API_STRUCT() struct FLAXENGINE_API ShadowCascadeSettings : ISerializable
 
 
 
-/// <summary>Which side of the shadow edge contributes receiver-distance values.</summary>
-API_ENUM() enum class ShadowDistanceSide
-{
-    /// <summary>Generates distance inside and outside the shadow.</summary>
-    Both = 0,
-    /// <summary>Retains only negative distances inside the shadow.</summary>
-    InnerOnly = 1,
-    /// <summary>Retains only positive distances outside the shadow.</summary>
-    OuterOnly = 2,
-};
-
 /// <summary>Graphics configuration for the scriptable render pipeline.</summary>
 API_CLASS(Attributes="ContentContextMenu(\"New/Rendering/Pipeline Graphics Settings\")")
 class FLAXENGINE_API RenderPipelineGraphicSettings : public ScriptingObject, public ISerializable
@@ -138,13 +127,7 @@ public:
     API_FIELD(Attributes="EditorOrder(140), EditorDisplay(\"Debug\", \"White Surface Lighting\")")
     bool ShowWhiteSurfaceLighting = false;
 
-    /// <summary>Uses blue lit surfaces and light-blue shadows in quantized bands. Runs after distance-field generation; when enabled, the distance field supplies the bands. Takes priority over White Surface Lighting and the distance preview; cascade debug still takes priority.</summary>
-    API_FIELD(Attributes="EditorOrder(145), EditorDisplay(\"Debug\", \"Cel Shading\")")
-    bool ShowCelShading = false;
 
-    /// <summary>Number of discrete colours between light-blue shadow and blue light. Two gives the original two-tone palette.</summary>
-    API_FIELD(Attributes="EditorOrder(146), EditorDisplay(\"Debug\", \"Cel Bands\"), Limit(2, 16), VisibleIf(nameof(ShowCelShading))")
-    int32 CelShadingBands = 2;
 
 
     /// <summary>Displays receiver-to-blocker distance along the directional-light ray in centimeters. With cascades, evaluates each configured band map and blends its distance display using the existing radial ranges and Blend Fraction. Without cascades, uses the full light map. Black is contact, white reaches the display range, blue has no blocking sample, magenta is outside light coverage. Averages blocker depths over the local shadow-map search; does not include contact visibility or recover hidden depth layers.</summary>
@@ -155,21 +138,9 @@ public:
     API_FIELD(Attributes="EditorOrder(149), EditorDisplay(\"Debug\", \"Blocker Display Range\"), Limit(0.01f), ValueCategory(Utils.ValueCategory.Distance), VisibleIf(nameof(ShowBlockerDistance))")
     float BlockerDistanceDisplayRange = 100.0f;
 
-    /// <summary>Displays approximate receiver-surface distance to the fully shadowed core edge. Combines camera depth and light depth; negative inside, positive outside, in world centimeters. Only visible receiver surfaces are available. Debug only; does not modify lighting. Cascade debug takes priority.</summary>
-    API_FIELD(Attributes="EditorOrder(150), EditorDisplay(\"Debug\", \"Shadow Distance Field\")")
-    bool ShowShadowDistanceField = false;
 
-    /// <summary>World distance in centimeters mapped to full debug colour. Does not change the stored distance field.</summary>
-    API_FIELD(Attributes="EditorOrder(160), EditorDisplay(\"Debug\", \"Distance Display Range\"), Limit(0.01f), ValueCategory(Utils.ValueCategory.Distance), VisibleIf(nameof(ShowShadowDistanceField))")
-    float ShadowDistanceDisplayRange = 32.0f;
 
-    /// <summary>Retains the inner, outer or both distance ranges. The excluded side stays fully shadowed or lit in cel banding and is black in the distance preview.</summary>
-    API_FIELD(Attributes="EditorOrder(161), EditorDisplay(\"Debug\", \"SDF Side\"), VisibleIf(nameof(ShowShadowDistanceField))")
-    ShadowDistanceSide DistanceFieldSide = ShadowDistanceSide::Both;
 
-    /// <summary>Cel preview fill at the jitter-to-core handoff. Zero keeps the original shadow. Higher values lift the handoff; the SDF fades this fill inward to the original shadow core over the distance range. The jitter curve keeps its shape and shares the handoff height.</summary>
-    API_FIELD(Attributes="EditorOrder(162), EditorDisplay(\"Debug\", \"Shadow Fill Strength\"), Limit(0.0f, 1.0f, 0.01f), VisibleIf(nameof(ShowShadowDistanceField))")
-    float ShadowFillStrength = 0.5f;
 
 
     /// <summary>Combines short camera-depth contact visibility with mapped shadows using minimum visibility. Camera-hidden and off-screen geometry remains covered only by the shadow map.</summary>
