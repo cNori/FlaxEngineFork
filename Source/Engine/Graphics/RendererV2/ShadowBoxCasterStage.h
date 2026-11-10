@@ -7,6 +7,7 @@
 #include "Engine/Core/Math/Vector3.h"
 #include "Engine/Core/Math/Color.h"
 #include "Engine/Core/Math/Vector4.h"
+#include "Engine/Core/Math/Matrix.h"
 
 class FrustumCullStage;
 class OcclusionCullStage;
@@ -16,6 +17,7 @@ class GPUDevice;
 class GPUTexture;
 class GPUPipelineState;
 class RenderBuffers;
+struct RenderView;
 class RenderPipelineGraphicSettings;
 
 /// <summary>Selects directional shadow casters using projected world-space bounds.</summary>
@@ -26,6 +28,24 @@ private:
     const FrustumCullStage* FrustumStage = nullptr;
     const OcclusionCullStage* OcclusionStage = nullptr;
     Array<IVisualData*> Casters;
+    // One current-view result per light projection (six for a point light).
+    // GPU storage is reused; borrowed object pointers expire at EndFrame.
+    struct PreparedSelection
+    {
+        GPUBuffer* Flags = nullptr;
+        Matrix Projection;
+        float Distance = 0;
+        bool Perspective = false;
+        int32 ReceiverWidth = 0;
+        int32 ReceiverHeight = 0;
+        Array<IVisualData*> Objects;
+    };
+    Array<PreparedSelection> PreparedSelections;
+    int32 PreparedSelectionCount = 0;
+    bool PreparingSelection = false;
+    const RenderView* ProjectedView = nullptr;
+    GPUTexture* ProjectedDepth = nullptr;
+    GPUTexture* ProjectedResult = nullptr;
     Vector3 LightDirection = Vector3::Zero;
     float ProjectionDistance = 0.0f;
     int32 LastCasterCount = 0;
@@ -37,6 +57,7 @@ private:
     int32 LastReceiverHeight = 0;
     bool LastUsedSelection = false;
     AssetReference<Shader> SelectionShader;
+    AssetReference<Shader> LightingShader;
     GPUBuffer* BoundsBuffer = nullptr;
     GPUBuffer* SelectionBuffer = nullptr;
     GPUBuffer* SelectionReadback = nullptr;
@@ -63,6 +84,8 @@ private:
     Array<BandDepthMap> BandDepthMaps;
     GPUPipelineState* DepthReductionState = nullptr;
     GPUBuffer* BlurBandSettings = nullptr;
+    GPUBuffer* CascadeResolveSettings = nullptr;
+    GPUPipelineState* CombinedCascadeMaskState = nullptr;
     Float2 GetBandDepthFootprint(const GPUTexture* depth) const;
     GPUTexture* GetBandDepth(GPUContext* context, GPUTexture* source, int32 resolution, Array<GPUTexture*>& usedMaps);
     RenderBuffers* LightDepthBuffers = nullptr;
@@ -70,6 +93,10 @@ private:
     int32 RequestedAtlasHeight = 0;
     GPUPipelineState* CasterBoundsDebugState = nullptr;
     GPUPipelineState* ResolveState = nullptr;
+    GPUPipelineState* BaseLightingState = nullptr;
+    int32 LastDirectionalLightCount = 0;
+    StageResult RenderDirectionalLight(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources, int32 projectedResolution = 0, bool selectionOnly = false, bool drawCasterDebug = true);
+    StageResult RenderBaseLighting(GPUContext* context, ICamera* viewpoint, RenderResourceTable& resources);
     GPUPipelineState* CascadeMaskState = nullptr;
     GPUPipelineState* PixelCascadeMaskState = nullptr;
     GPUPipelineState* CascadeDebugState = nullptr;
@@ -80,6 +107,8 @@ private:
     bool PrepareSharedShadowDepth(GPUDevice* device, const RenderPipelineGraphicSettings* settings);
 public:
     ~ShadowBoxCasterStage();
+    /// <summary>Runs current-view directional caster selection before material shading.</summary>
+    StageResult PrepareSelections(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources);
 
     /// <summary>Meshes above this triangle count use a box for GPU caster selection.</summary>
     API_FIELD() int32 ProxyTriangleThreshold = 4096;
@@ -118,6 +147,13 @@ public:
 
     /// <summary>Sets the direction light travels and the maximum caster-to-receiver distance.</summary>
     API_FUNCTION() void SetProjection(const Vector3& lightDirection, float distance);
+
+    /// <summary>Uses the shared light/receiver selection and indirect depth submission with a supplied perspective light view.</summary>
+    StageResult RenderProjectedShadowMap(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint,
+        RenderResourceTable& resources, const RenderView& lightView, GPUTexture*& output, int32 resolution = 0, bool selectionOnly = false);
+
+    /// <summary>Number of positive-intensity directional lights collected for this view. Manual fallback counts as one.</summary>
+    API_PROPERTY() int32 GetDirectionalLightCount() const { return LastDirectionalLightCount; }
 
     /// <summary>The number of entries submitted for GPU selection in the last view.</summary>
     API_PROPERTY() int32 GetCasterCount() const { return LastCasterCount; }

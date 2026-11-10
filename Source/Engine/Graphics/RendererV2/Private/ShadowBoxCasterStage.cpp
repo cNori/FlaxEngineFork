@@ -1,6 +1,7 @@
 // Copyright (c) Wojciech Figat. All rights reserved.
 
 #include "../ShadowBoxCasterStage.h"
+#include "../ILightData.h"
 #include "../FrustumCullStage.h"
 #include "../OcclusionCullStage.h"
 #include "../RenderPipelineGraphicSettings.h"
@@ -34,14 +35,14 @@ namespace
     constexpr int32 MaximumShadowResolution = 16384;
     constexpr int32 FarShadowResolution = 512;
 
-    int32 InitShadowDepthMap(GPUDevice* device, GPUTexture* depth, int32 resolution, int32 farTileWidth)
+    int32 InitShadowDepthMap(GPUDevice* device, GPUTexture* depth, int32 resolution, int32 farTileWidth, bool perspective = false)
     {
         const PixelFormat formats[] = { PixelFormat::D16_UNorm, GPU_DEPTH_BUFFER_PIXEL_FORMAT, PixelFormat::D32_Float };
         const int32 minResolution = Math::Min(resolution, FarShadowResolution);
         for (int32 size = resolution; ; size = Math::Max(minResolution, size / 2))
         {
             // Keep the original depth format for the default size and prefer D16 for large maps.
-            for (int32 i = size > 4096 ? 0 : 1; i < ARRAY_COUNT(formats); i++)
+            for (int32 i = perspective ? 2 : size > 4096 ? 0 : 1; i < ARRAY_COUNT(formats); i++)
             {
                 const auto format = formats[i];
                 const auto sampleFormat = PixelFormatExtensions::FindShaderResourceFormat(format, false);
@@ -111,7 +112,7 @@ namespace
         Float3 Minimum;
         uint32 UseProxy;
         Float3 Maximum;
-        uint32 Padding = 0;
+        uint32 CameraIndex = MAX_uint32;
     };
     static_assert(sizeof(CasterBounds) == 32, "Caster bounds must match the shader layout.");
 
@@ -144,6 +145,14 @@ namespace
         }
         return true;
     }
+
+    // Matches V2CascadeDescriptor in Culling.shader (48 bytes).
+    struct CascadeResolveData
+    {
+        Float4 Range;
+        Float4 Sampling; // Map size, depth bias, normal offset, filter radius.
+        Float4 Footprint; // Reduction support XY, original cascade index, reserved.
+    };
 
     GPU_CB_STRUCT(ResolveConstants
     {
@@ -182,7 +191,7 @@ namespace
         uint32 Height;
         uint32 CasterCount;
         uint32 GroupsPerRow;
-        uint32 Padding0;
+        uint32 HasCameraVisibility;
         uint32 HasLightDepth;
         uint32 HasReceiverNormals;
         float FilterRadius;
@@ -195,6 +204,7 @@ namespace
         uint32 CasterDebugFlags;
         float Padding1;
         uint32 Padding[2];
+        Float4 LightPosition; // XYZ in render space; W: perspective local light.
     });
 }
 
@@ -205,11 +215,18 @@ ShadowBoxCasterStage::ShadowBoxCasterStage(const SpawnParams& params)
 
 ShadowBoxCasterStage::~ShadowBoxCasterStage()
 {
+    for (auto& entry : PreparedSelections)
+        SAFE_DELETE_GPU_RESOURCE(entry.Flags);
+    if (LightingShader)
+        LightingShader->Reloading.Unbind<ShadowBoxCasterStage, &ShadowBoxCasterStage::OnShaderReloading>(this);
     if (SelectionShader)
         SelectionShader->Reloading.Unbind<ShadowBoxCasterStage, &ShadowBoxCasterStage::OnShaderReloading>(this);
     SAFE_DELETE_GPU_RESOURCE(CasterBoundsDebugState);
     SAFE_DELETE_GPU_RESOURCE(ResolveState);
+    SAFE_DELETE_GPU_RESOURCE(BaseLightingState);
     SAFE_DELETE_GPU_RESOURCE(BlurBandSettings);
+    SAFE_DELETE_GPU_RESOURCE(CascadeResolveSettings);
+    SAFE_DELETE_GPU_RESOURCE(CombinedCascadeMaskState);
     SAFE_DELETE_GPU_RESOURCE(CascadeMaskState);
     SAFE_DELETE_GPU_RESOURCE(PixelCascadeMaskState);
     SAFE_DELETE_GPU_RESOURCE(CascadeDebugState);
@@ -227,6 +244,7 @@ ShadowBoxCasterStage::~ShadowBoxCasterStage()
     SAFE_DELETE_GPU_RESOURCE(CameraReceiverCasters);
     SAFE_DELETE_GPU_RESOURCE(CameraReceiverTileMax);
     SAFE_DELETE_GPU_RESOURCE(SharedCascadeDepth);
+    SAFE_DELETE_GPU_RESOURCE(ProjectedDepth);
     SAFE_DELETE_GPU_RESOURCE(DepthReductionState);
     for (auto& map : BandDepthMaps)
         SAFE_DELETE_GPU_RESOURCE(map.Texture);
@@ -244,6 +262,10 @@ void ShadowBoxCasterStage::OnShaderReloading(Asset* asset)
         CasterBoundsDebugState->ReleaseGPU();
     if (ResolveState)
         ResolveState->ReleaseGPU();
+    if (BaseLightingState)
+        BaseLightingState->ReleaseGPU();
+    if (CombinedCascadeMaskState)
+        CombinedCascadeMaskState->ReleaseGPU();
     if (CascadeMaskState)
         CascadeMaskState->ReleaseGPU();
     if (PixelCascadeMaskState)
@@ -311,7 +333,158 @@ bool ShadowBoxCasterStage::PrepareSharedShadowDepth(GPUDevice* device, const Ren
     return true;
 }
 
+StageResult ShadowBoxCasterStage::RenderBaseLighting(GPUContext* context, ICamera* viewpoint, RenderResourceTable& resources)
+{
+    const auto* view = dynamic_cast<const WarpedViewpoint*>(viewpoint);
+    auto* color = resources.Get<GPUTexture>(TEXT("Scene.Color"));
+    auto* depth = resources.Get<GPUTexture>(TEXT("Shadow.ReceiverDepth"));
+    auto* base = resources.Get<GPUTexture>(TEXT("Scene.BaseColor"));
+    auto* normals = resources.Get<GPUTexture>(TEXT("Scene.Normals"));
+    auto* material = resources.Get<GPUTexture>(TEXT("Scene.Material"));
+    auto* emissive = resources.Get<GPUTexture>(TEXT("Scene.Emissive"));
+    if (!view || !color || !depth || !base || !normals || !material || !emissive)
+        return StageResult::Skipped;
+    if (!LightingShader)
+    {
+        LightingShader = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/Utils/DirectionalLight"));
+        if (LightingShader)
+            LightingShader->Reloading.Bind<ShadowBoxCasterStage, &ShadowBoxCasterStage::OnShaderReloading>(this);
+    }
+    if (!LightingShader || !LightingShader->IsLoaded() || !LightingShader->GPU)
+        return StageResult::Skipped;
+    auto* constants = LightingShader->GPU->GetCB(3);
+    auto* shader = LightingShader->GPU->GetPS("PS_V2DirectionalLighting");
+    auto* device = context->GetDevice();
+    if (!constants || constants->GetSize() != sizeof(ResolveConstants) || !shader)
+        return StageResult::Failed;
+    if (!BaseLightingState)
+        BaseLightingState = device->CreatePipelineState();
+    if (!BaseLightingState)
+        return StageResult::Failed;
+    if (!BaseLightingState->IsValid())
+    {
+        auto desc = GPUPipelineState::Description::DefaultFullscreenTriangle;
+        desc.PS = shader;
+        if (BaseLightingState->Init(desc))
+            return StageResult::Failed;
+    }
+    // Shared shader resource declarations require a valid structured t0 binding.
+    if (!BlurBandSettings)
+        BlurBandSettings = device->CreateBuffer(TEXT("V2 Shadow Band Binding"));
+    if (!BlurBandSettings || (BlurBandSettings->GetElementsCount() == 0 &&
+        BlurBandSettings->Init(GPUBufferDescription::Structured(1, sizeof(BlurBandData)))))
+        return StageResult::Failed;
+    ResolveConstants data = {};
+    Matrix inverse;
+    Matrix::Invert(view->ViewProjection, inverse);
+    Matrix::Transpose(inverse, data.InverseViewProjection);
+    data.AmbientIntensity = AmbientIntensity;
+    const auto* settings = resources.GetGraphicsSettings();
+    data.DebugOptions.X = settings && settings->ShowWhiteSurfaceLighting ? 1.0f : 0.0f;
+    PROFILE_GPU_CPU_NAMED("V2 Base Lighting");
+    context->ResetRenderTarget();
+    context->ResetSR();
+    context->UpdateCB(constants, &data);
+    context->BindCB(3, constants);
+    context->BindSR(0, BlurBandSettings->View());
+    context->BindSR(2, depth);
+    context->BindSR(8, normals);
+    context->BindSR(9, base);
+    context->BindSR(10, material);
+    context->BindSR(11, emissive);
+    context->SetViewportAndScissors((float)color->Width(), (float)color->Height());
+    context->SetRenderTarget(color->View());
+    context->SetState(BaseLightingState);
+    context->DrawFullscreenTriangle();
+    context->ResetRenderTarget();
+    context->ResetSR();
+    return StageResult::Completed;
+}
+
+StageResult ShadowBoxCasterStage::PrepareSelections(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources)
+{
+    PreparingSelection = true;
+    const auto result = Render(context, objects, viewpoint, resources);
+    PreparingSelection = false;
+    return result;
+}
+
 StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources)
+{
+    LastDirectionalLightCount = 0;
+    LastRejectedProxyCount = LastProxyCasterCount = LastReceiverWidth = LastReceiverHeight = 0;
+    LastUsedSelection = false;
+    Array<ILightData*, InlinedAllocation<4>> lights;
+    for (auto* light : resources.GetLights())
+    {
+        if (light && light->GetILD_Type() == RenderLightKind::Directional &&
+            light->GetILD_Intensity() * light->GetILD_Color().A > 0.0f &&
+            !light->GetILD_Direction().IsZero())
+            lights.Add(light);
+    }
+    const Vector3 manualDirection = LightDirection;
+    const float manualDistance = ProjectionDistance;
+    const Color manualColor = LightColor;
+    const float manualIntensity = LightIntensity;
+    const auto* settings = resources.GetGraphicsSettings();
+    const bool debug = settings && (settings->ShowShadowCascades || settings->ShowShadowBlurBands ||
+        settings->ShowBlockerDistance || settings->ShowContactShadows);
+    LastDirectionalLightCount = lights.Count();
+    auto result = PreparingSelection ? StageResult::Completed : RenderBaseLighting(context, viewpoint, resources);
+    if (result != StageResult::Completed)
+        return result;
+    if (lights.IsEmpty())
+    {
+        LastCasterCount = LastCascadeCount = LastSelectionDispatchCount = 0;
+        if (manualDistance > 0.0f && !manualDirection.IsZero() && manualIntensity > 0.0f)
+        {
+            LastDirectionalLightCount = 1;
+            return RenderDirectionalLight(context, objects, viewpoint, resources, 0, PreparingSelection);
+        }
+        return StageResult::Completed;
+    }
+    const int32 debugIndex = Math::Clamp(settings ? settings->DebugDirectionalLightIndex : 0, 0, lights.Count() - 1);
+    for (int32 i = 0; i < lights.Count(); i++)
+    {
+        if (debug && i != debugIndex)
+            continue;
+        PROFILE_GPU_CPU_NAMED("V2 Directional Light");
+        const auto* light = lights[i];
+        LightColor = light->GetILD_Color();
+        LightIntensity = light->GetILD_Intensity() * LightColor.A;
+        SetProjection(light->GetILD_Direction(), manualDistance > 0.0f ? manualDistance : 10000.0f);
+        const auto status = RenderDirectionalLight(context, objects, viewpoint, resources, 0, PreparingSelection, i == debugIndex);
+        if (status == StageResult::Failed)
+        {
+            result = status;
+            break;
+        }
+    }
+    LightDirection = manualDirection;
+    ProjectionDistance = manualDistance;
+    LightColor = manualColor;
+    LightIntensity = manualIntensity;
+    return result;
+}
+
+StageResult ShadowBoxCasterStage::RenderProjectedShadowMap(GPUContext* context, Array<IVisualData*>& objects,
+    ICamera*& viewpoint, RenderResourceTable& resources, const RenderView& lightView, GPUTexture*& output, int32 resolution, bool selectionOnly)
+{
+    const auto* previous = ProjectedView;
+    const auto direction = LightDirection;
+    const float distance = ProjectionDistance;
+    ProjectedView = &lightView;
+    ProjectedResult = nullptr;
+    SetProjection(Vector3(lightView.Direction), lightView.Far);
+    const auto result = RenderDirectionalLight(context, objects, viewpoint, resources, resolution, selectionOnly);
+    output = ProjectedResult;
+    ProjectedView = previous;
+    LightDirection = direction;
+    ProjectionDistance = distance;
+    return result;
+}
+
+StageResult ShadowBoxCasterStage::RenderDirectionalLight(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources, int32 projectedResolution, bool selectionOnly, bool drawCasterDebug)
 {
     Casters.Clear();
     LastCasterCount = 0;
@@ -334,7 +507,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
 
     if (!SelectionShader)
     {
-        SelectionShader = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/Utils/Culling"));
+        SelectionShader = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/Utils/ShadowSelection"));
         if (SelectionShader)
             SelectionShader->Reloading.Bind<ShadowBoxCasterStage, &ShadowBoxCasterStage::OnShaderReloading>(this);
     }
@@ -346,16 +519,17 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
 
     const auto* settings = resources.GetGraphicsSettings();
     const int32 proxyTriangleThreshold = settings ? settings->ShadowProxyTriangleThreshold : ProxyTriangleThreshold;
-    const float nearShadowDistance = settings ? 0.0f : NearShadowDistance;
-    const int32 requestedShadowResolution = settings ? settings->ShadowDepthResolution : ShadowMapResolution;
+    const float nearShadowDistance = ProjectedView || settings ? 0.0f : NearShadowDistance;
+    const int32 requestedShadowResolution = ProjectedView && projectedResolution > 0 ? projectedResolution :
+        settings ? settings->ShadowDepthResolution : ShadowMapResolution;
     const bool smoothShadows = !settings || settings->ShadowRendering == ShadowRenderingMode::Smooth;
     const bool adaptiveFilter = smoothShadows;
     const float adaptiveRadius = 8.0f;
     const float angularRadius = 0.27f;
     const bool indirectShadowDraws = settings ? settings->UseIndirectShadowDraws : UseIndirectShadowDraws;
     const bool cascadeDebugRequested = settings && !settings->ShadowCascades.IsEmpty() && settings->ShowShadowCascades;
-    const bool showSelectedCasters = !cascadeDebugRequested && (ShowSelectedExpensiveCasters || (settings && settings->ShowSelectedExpensiveShadowCasters));
-    const bool showRejectedCasters = !cascadeDebugRequested && (ShowRejectedExpensiveCasters || (settings && settings->ShowRejectedExpensiveShadowCasters));
+    const bool showSelectedCasters = drawCasterDebug && !cascadeDebugRequested && (ShowSelectedExpensiveCasters || (settings && settings->ShowSelectedExpensiveShadowCasters));
+    const bool showRejectedCasters = drawCasterDebug && !cascadeDebugRequested && (ShowRejectedExpensiveCasters || (settings && settings->ShowRejectedExpensiveShadowCasters));
 
     const BoundingFrustum frustum(view->ViewProjection);
     const Vector3 sweepOffset(Float3(LightDirection) * ProjectionDistance);
@@ -368,7 +542,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     }
 
     Array<CasterBounds> bounds;
-    const auto append = [&](const Array<IVisualData*>& candidates)
+    const auto append = [&](const Array<IVisualData*>& candidates, bool cameraCandidates = false)
     {
         for (int32 cameraIndex = 0; cameraIndex < candidates.Count(); cameraIndex++)
         {
@@ -376,7 +550,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
             auto* warped = dynamic_cast<WarpedVisualData*>(object);
             auto* actor = warped ? dynamic_cast<StaticModel*>(warped->GetIVD_Source()) : nullptr;
             auto* model = actor ? actor->Model.Get() : nullptr;
-            if (!model || !model->IsLoaded())
+            if (!model || !model->IsLoaded() || (ProjectedView && !ProjectedView->Frustum.Intersects(warped->Bounds)))
                 continue;
             const int32 lod = model->HighestResidentLODIndex();
             if (lod < 0 || lod >= model->LODs.Count())
@@ -392,11 +566,15 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
             entry.Minimum = Float3(warped->Bounds.Minimum);
             entry.Maximum = Float3(warped->Bounds.Maximum);
             entry.UseProxy = triangles > proxyTriangleThreshold ? 1 : 0;
+            // The camera occlusion buffer indexes the forwarded object list. Rejected
+            // and offscreen lists have no camera-visible fallback.
+            if (cameraCandidates)
+                entry.CameraIndex = (uint32)cameraIndex;
             bounds.Add(entry);
             Casters.Add(object);
         }
     };
-    append(objects);
+    append(objects, true);
     if (FrustumStage)
         append(FrustumStage->GetRejectedObjects());
     if (OcclusionStage)
@@ -416,30 +594,45 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     int32 smallestCascade = atlasLimit;
     if (context == device->GetMainContext())
     {
-        if (settings && !settings->ShadowCascades.IsEmpty() && (!SharedCascadeDepth || !SharedCascadeDepth->GetMemoryUsage()) && LightDepthBuffers)
-            LightDepthBuffers->DepthBuffer->ReleaseGPU();
-        useConfiguredCascades = PrepareSharedShadowDepth(device, settings);
-        if (useConfiguredCascades)
+        if (ProjectedView)
         {
-            lightDepth = SharedCascadeDepth;
-            smallestCascade = SharedCascadeDepth->Width();
-        }
-        if (useConfiguredCascades)
-        {
-            // Material binding still uses RenderBuffers even when depth targets are separate.
             if (!LightDepthBuffers)
                 LightDepthBuffers = New<RenderBuffers>();
-            else if (LightDepthBuffers->DepthBuffer->GetMemoryUsage())
-                LightDepthBuffers->DepthBuffer->ReleaseGPU();
+            if (!ProjectedDepth)
+                ProjectedDepth = device->CreateTexture(TEXT("V2 Projected Light Depth"));
+            if (!ProjectedDepth || ((ProjectedDepth->Width() != resolution || !ProjectedDepth->GetMemoryUsage()) &&
+                InitShadowDepthMap(device, ProjectedDepth, resolution, 0, true) == 0))
+                return StageResult::Failed;
+            lightDepth = ProjectedDepth;
         }
         else
         {
-            resolution = PrepareShadowAtlas(device, resolution, farTileWidth);
-            if (resolution == 0)
-                return StageResult::Completed;
-            lightDepth = LightDepthBuffers->DepthBuffer;
+            if (settings && !settings->ShadowCascades.IsEmpty() && (!SharedCascadeDepth || !SharedCascadeDepth->GetMemoryUsage()) && LightDepthBuffers)
+                LightDepthBuffers->DepthBuffer->ReleaseGPU();
+            useConfiguredCascades = PrepareSharedShadowDepth(device, settings);
+            if (useConfiguredCascades)
+            {
+                lightDepth = SharedCascadeDepth;
+                smallestCascade = SharedCascadeDepth->Width();
+            }
+            if (useConfiguredCascades)
+            {
+                // Material binding still uses RenderBuffers even when depth targets are separate.
+                if (!LightDepthBuffers)
+                    LightDepthBuffers = New<RenderBuffers>();
+                else if (LightDepthBuffers->DepthBuffer->GetMemoryUsage())
+                    LightDepthBuffers->DepthBuffer->ReleaseGPU();
+            }
+            else
+            {
+                resolution = PrepareShadowAtlas(device, resolution, farTileWidth);
+                if (resolution == 0)
+                    return StageResult::Completed;
+                lightDepth = LightDepthBuffers->DepthBuffer;
+            }
         }
     }
+
     const int32 farResolution = useTiers ? FarShadowResolution : resolution;
     const float inheritedRadius = adaptiveFilter
         ? Math::Clamp(adaptiveRadius, 0.0f, 32.0f) : 0.0f;
@@ -464,7 +657,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         }
     }
     Array<BlurBandData, InlinedAllocation<8>> blurBands;
-    if (settings && smoothShadows)
+    if (settings && smoothShadows && !ProjectedView)
     {
         float previousEnd = 0, previousFade = 0;
         for (int32 i = 0; i < settings->ShadowCascades.Count(); i++)
@@ -506,7 +699,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
             return StageResult::Failed;
     }
     float sweepPadding = 0.0f;
-    if (filterRadius > 0 || maxNormalBias > 0)
+    if (!ProjectedView && (filterRadius > 0 || maxNormalBias > 0))
     {
         // The world diagonal bounds both fitted light-space axes before caster rejection.
         Float3 minimum = bounds[0].Minimum;
@@ -526,7 +719,8 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     if (lightDepth)
     {
         const Float3 up = Math::Abs(direction.Y) > 0.99f ? Float3::Right : Float3::Up;
-        Matrix::LookAt(Float3::Zero, direction, up, lightView);
+        if (ProjectedView) lightView = ProjectedView->View;
+        else Matrix::LookAt(Float3::Zero, direction, up, lightView);
         lightCasterBounds.EnsureCapacity(bounds.Count());
     }
 
@@ -534,7 +728,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     int32 keptCount = 0;
     for (int32 i = 0; i < bounds.Count(); i++)
     {
-        const bool keep = !bounds[i].UseProxy || CanReachView(bounds[i], sweepPlanes, sweepPadding);
+        const bool keep = ProjectedView || !bounds[i].UseProxy || CanReachView(bounds[i], sweepPlanes, sweepPadding);
         if (lightDepth)
         {
             // Fit before view rejection so a caster entering the camera frustum cannot resize the atlas projection.
@@ -705,7 +899,8 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         const Float3 maximum = Float3(lightBounds.Maximum) + Float3::One;
         lightDepthRange = maximum.Z - minimum.Z;
         Matrix lightProjection;
-        Matrix::OrthoOffCenter(minimum.X, maximum.X, minimum.Y, maximum.Y, minimum.Z, maximum.Z, lightProjection);
+        if (ProjectedView) lightProjection = ProjectedView->Projection;
+        else Matrix::OrthoOffCenter(minimum.X, maximum.X, minimum.Y, maximum.Y, minimum.Z, maximum.Z, lightProjection);
 
         const Float3 cameraPosition(view->LocalTransform.Translation);
         const Float3 cameraForward(Vector3::Transform(Vector3::Forward, view->LocalTransform.Orientation));
@@ -759,7 +954,8 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         data.HasLightDepth = 1;
         context->ResetRenderTarget();
         context->ResetSR();
-        context->ClearDepth(lightDepth->View());
+        if (!selectionOnly)
+            context->ClearDepth(lightDepth->View());
         for (int32 tier = 0; tier < tierCount; tier++)
         {
             if (tier == 1)
@@ -773,8 +969,13 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
             lightContext.View.Direction = direction;
             lightContext.View.SetUp(lightView, lightProjection);
             lightContext.View.PrevViewProjection = lightContext.View.ViewProjection();
-            lightContext.View.Near = minimum.Z;
-            lightContext.View.Far = maximum.Z;
+            lightContext.View.Near = ProjectedView ? ProjectedView->Near : minimum.Z;
+            lightContext.View.Far = ProjectedView ? ProjectedView->Far : maximum.Z;
+            if (ProjectedView)
+            {
+                lightContext.View.Position = ProjectedView->Position;
+                lightContext.View.Origin = ProjectedView->Origin;
+            }
             lightContext.View.PrepareCache(lightContext, tile.Width, tile.Height, Float2::Zero);
             data.ShadowTiles[tier] = Float4(tile.Location.X, tile.Location.Y, tile.Width, tile.Height);
             Matrix::Transpose(lightContext.View.ViewProjection(), tier == 0 ? data.LightViewProjection : data.NearLightViewProjection);
@@ -786,11 +987,16 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     Matrix::Transpose(inverse, data.InverseViewProjection);
     Matrix::Transpose(view->ViewProjection, data.ViewProjection);
     data.DirectionToLight = -Float3(LightDirection);
+    data.LightPosition = ProjectedView ? Float4(ProjectedView->Position, 1) : Float4::Zero;
     data.ProjectionDistance = ProjectionDistance;
     data.Width = depth->Width();
     data.Height = depth->Height();
     data.CasterCount = count;
     data.GroupsPerRow = Math::Min(count, 1024);
+    auto* cameraVisibility = resources.Get<GPUBuffer>(TEXT("Occlusion.Visibility"));
+    if (cameraVisibility && cameraVisibility->GetElementsCount() < (uint32)objects.Count())
+        cameraVisibility = nullptr;
+    data.HasCameraVisibility = cameraVisibility ? 1u : 0u;
     auto* receiverNormals = resources.Get<GPUTexture>(TEXT("Shadow.ReceiverNormals"));
     data.HasReceiverNormals = receiverNormals ? 1 : 0;
     data.FilterRadius = filterRadius;
@@ -804,195 +1010,265 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         PROFILE_GPU_CPU_NAMED("V2 Shadow Upload Caster Bounds");
         context->UpdateBuffer(BoundsBuffer, bounds.Get(), count * sizeof(CasterBounds));
     }
-    constexpr int32 selectionMapResolution = 1024;
-    // Build selection depth once. Final shadow bands share a separate high-resolution depth draw.
-    SelectionConstants candidateData = data;
-    candidateData.HasLightDepth = 0;
-    candidateData.ShadowSplit = Float4::Zero;
-    candidateData.ReceiverRange = Float4::Zero;
-    candidateData.FilterRadius = 0;
-    if (lightDepth)
+    // Configured cascades build their final draw projection only AFTER selection.
+    // data.LightViewProjection is still zero here for those lights, so it cannot
+    // identify a cached result. Key the actual projection used by the selector.
+    Matrix selectionProjectionKey;
+    if (ProjectedView)
+        selectionProjectionKey = ProjectedView->ViewProjection();
+    else
     {
-        if (!CandidateOccluderDepth)
-            CandidateOccluderDepth = device->CreateTexture(TEXT("V2 Candidate Occluder Depth"));
-        const bool ready = CandidateOccluderDepth &&
-            ((CandidateOccluderDepth->Width() == selectionMapResolution && CandidateOccluderDepth->GetMemoryUsage()) ||
-                InitShadowDepthMap(device, CandidateOccluderDepth, selectionMapResolution, 0) != 0);
-        if (ready)
-        {
-            PROFILE_GPU_CPU_NAMED("V2 Shadow Candidate Occluders");
-            auto* savedDepth = lightDepth;
-            const auto savedViewport = tileViewports[0];
-            const auto savedBounds = nearBounds;
-            auto& candidateContext = lightContexts[0];
-            const auto savedView = candidateContext.View;
-            const Float3 minimum = Float3(lightBounds.Minimum) - Float3::One;
-            const Float3 maximum = Float3(lightBounds.Maximum) + Float3::One;
-            Matrix projection;
-            Matrix::OrthoOffCenter(minimum.X, maximum.X, minimum.Y, maximum.Y, minimum.Z, maximum.Z, projection);
-            lightDepth = CandidateOccluderDepth;
-            tileViewports[0] = Viewport(0, 0, (float)selectionMapResolution, (float)selectionMapResolution);
-            nearBounds = BoundingBox(Vector3(minimum), Vector3(maximum));
-            candidateContext.Buffers = LightDepthBuffers;
-            candidateContext.View.Pass = DrawPass::Depth;
-            candidateContext.View.Flags = ViewFlags::None;
-            candidateContext.View.Direction = direction;
-            candidateContext.View.SetUp(lightView, projection);
-            candidateContext.View.PrevViewProjection = candidateContext.View.ViewProjection();
-            candidateContext.View.Near = minimum.Z;
-            candidateContext.View.Far = maximum.Z;
-            candidateContext.View.PrepareCache(candidateContext, (float)selectionMapResolution, (float)selectionMapResolution, Float2::Zero);
-            context->ClearDepth(CandidateOccluderDepth->View());
-            drawShadowDepth(0, false, nullptr, false);
-            Matrix::Transpose(candidateContext.View.ViewProjection(), candidateData.LightViewProjection);
-            // The shared selection pass uses this otherwise unused tier matrix
-            // to reconstruct light-space texel rays through each real box.
-            Matrix inverseLight;
-            Matrix::Invert(candidateContext.View.ViewProjection(), inverseLight);
-            Matrix::Transpose(inverseLight, candidateData.NearLightViewProjection);
-            candidateData.ShadowTiles[0] = Float4(0, 0, (float)selectionMapResolution, (float)selectionMapResolution);
-            candidateData.ShadowSplit.W = GetShadowDepthPrecisionBias(CandidateOccluderDepth->Format());
-            candidateData.HasLightDepth = 1;
-            candidateData.ReceiverRange.Z = maximum.Z - minimum.Z;
-            lightDepth = savedDepth;
-            tileViewports[0] = savedViewport;
-            nearBounds = savedBounds;
-            candidateContext.View = savedView;
-            resources.SetOutput(TEXT("Shadow.CandidateOccluderDepth"), CandidateOccluderDepth);
-        }
+        const Float3 minimum = Float3(lightBounds.Minimum) - Float3::One;
+        const Float3 maximum = Float3(lightBounds.Maximum) + Float3::One;
+        Matrix projection;
+        Matrix::OrthoOffCenter(minimum.X, maximum.X, minimum.Y, maximum.Y, minimum.Z, maximum.Z, projection);
+        Matrix::Multiply(lightView, projection, selectionProjectionKey);
     }
-    // Step 1: prove light occlusion against real cheap geometry. The result is
-    // independent of camera visibility and shared by every cascade.
+    PreparedSelection* prepared = nullptr;
+    if (!selectionOnly)
     {
-        PROFILE_GPU_CPU_NAMED("V2 Shadow 1 Light Visibility");
-        auto* lightVisibility = SelectionShader->GPU->GetCS("CS_V2LightCasterVisibility");
-        if (!lightVisibility)
-            return StageResult::Failed;
-        context->UpdateCB(constants, &candidateData);
-        context->BindCB(1, constants);
-        context->BindSR(3, BoundsBuffer->View());
-        context->BindSR(7, candidateData.HasLightDepth ? CandidateOccluderDepth : depth);
-        context->BindUA(0, LightVisibilityBuffer->View());
-        context->Dispatch(lightVisibility, data.GroupsPerRow, Math::DivideAndRoundUp(data.CasterCount, data.GroupsPerRow));
-        context->ResetUA();
-        context->ResetSR();
-        resources.SetOutput(TEXT("Shadow.LightVisibility"), LightVisibilityBuffer);
-    }
-
-    // Reproject camera-visible opaque surfaces ONCE into the shared light map.
-    // Atomic min/max preserve multiple receiver depths per texel. No CPU readback.
-    // The scatter visits camera pixels once; map/caster tests use the fixed 1024 map.
-    if (candidateData.HasLightDepth)
-    {
-        auto initReceiverMap = [&](GPUTexture*& texture, const Char* name)
+        for (int32 i = 0; i < PreparedSelectionCount; i++)
         {
-            if (!texture)
-                texture = device->CreateTexture(name);
-            return texture && ((texture->Width() == selectionMapResolution && texture->GetMemoryUsage()) ||
-                !texture->Init(GPUTextureDescription::New2D(selectionMapResolution, selectionMapResolution,
-                    PixelFormat::R32_UInt, GPUTextureFlags::ShaderResource | GPUTextureFlags::UnorderedAccess)));
-        };
-        if (!initReceiverMap(CameraReceiverMask, TEXT("V2 Camera Receivers Light Coverage")) ||
-            !initReceiverMap(CameraReceiverNear, TEXT("V2 Camera Receivers Near Depth")) ||
-            !initReceiverMap(CameraReceiverFar, TEXT("V2 Camera Receivers Far Depth")))
-            return StageResult::Failed;
-        if (!CameraReceiverCasters)
-            CameraReceiverCasters = device->CreateBuffer(TEXT("V2 Camera Receiver Caster Candidates"));
-        if (!CameraReceiverCasters || (CameraReceiverCasters->GetElementsCount() < (uint32)count &&
-            CameraReceiverCasters->Init(GPUBufferDescription::Structured(count, sizeof(uint32), true))))
-            return StageResult::Failed;
-        // Avoid paying a whole-map reduction for a few small projected boxes.
-        // This upper-bound scan estimate uses bounds already transformed for fitting;
-        // it never reads GPU results back to the CPU.
-        double projectedScanTexels = 0;
-        const Float3 lightExtent = Float3(lightBounds.Maximum - lightBounds.Minimum) + Float3(2.0f);
-        for (int32 i = 0; i < count; i++)
-        {
-            if (!bounds[i].UseProxy)
+            auto& entry = PreparedSelections[i];
+            if (entry.Distance != ProjectionDistance || entry.Perspective != (ProjectedView != nullptr) ||
+                entry.Objects.Count() != count || entry.Projection != selectionProjectionKey)
                 continue;
-            const Float3 extent = Float3(lightCasterBounds[i].Maximum - lightCasterBounds[i].Minimum);
-            const float width = Math::Min((float)selectionMapResolution, extent.X / lightExtent.X * selectionMapResolution + 4.0f);
-            const float height = Math::Min((float)selectionMapResolution, extent.Y / lightExtent.Y * selectionMapResolution + 4.0f);
-            projectedScanTexels += (double)width * height;
+            bool sameObjects = true;
+            for (int32 j = 0; j < count; j++)
+                sameObjects &= entry.Objects[j] == Casters[j];
+            if (sameObjects) { prepared = &entry; break; }
         }
-        const bool useReceiverTiles = projectedScanTexels >= (double)selectionMapResolution * selectionMapResolution;
-        const int32 tileResolution = Math::DivideAndRoundUp(selectionMapResolution,8);
-        if (useReceiverTiles)
-        {
-            if (!CameraReceiverTileMax)
-                CameraReceiverTileMax = device->CreateTexture(TEXT("V2 Receiver Tile Maximum"));
-            if (!CameraReceiverTileMax || ((CameraReceiverTileMax->Width() != tileResolution || !CameraReceiverTileMax->GetMemoryUsage()) &&
-                CameraReceiverTileMax->Init(GPUTextureDescription::New2D(tileResolution,tileResolution,PixelFormat::R32_UInt,
-                    GPUTextureFlags::ShaderResource | GPUTextureFlags::UnorderedAccess))))
-                return StageResult::Failed;
-        }
-        auto* tileReceivers = SelectionShader->GPU->GetCS("CS_V2ReceiverTileMax");
-        auto* projectReceivers = SelectionShader->GPU->GetCS("CS_V2ProjectCameraReceivers");
-        auto* intersectReceivers = SelectionShader->GPU->GetCS("CS_V2ReceiverMaskCasters");
-        if (!projectReceivers || !intersectReceivers || (useReceiverTiles && !tileReceivers))
-            return StageResult::Failed;
-        const uint32 clear[4] = {};
-        const uint32 emptyNear[4] = { MAX_uint32, MAX_uint32, MAX_uint32, MAX_uint32 };
-        context->ResetRenderTarget();
-        context->ResetSR();
-        context->ResetUA();
-        context->ClearUA(CameraReceiverMask, clear);
-        context->ClearUA(CameraReceiverNear, emptyNear);
-        context->ClearUA(CameraReceiverFar, clear);
-        if (useReceiverTiles) candidateData.CasterDebugFlags |= 262144u;
-        context->UpdateCB(constants, &candidateData);
-        context->BindCB(1, constants);
-        {
-            PROFILE_GPU_CPU_NAMED("V2 Shadow Camera To Light Receivers");
-            context->BindSR(2, depth);
-            context->BindSR(8, receiverNormals ? receiverNormals : depth);
-            context->BindUA(0, CameraReceiverMask->View());
-            context->BindUA(1, CameraReceiverNear->View());
-            context->BindUA(2, CameraReceiverFar->View());
-            context->Dispatch(projectReceivers, Math::DivideAndRoundUp(data.Width, 8u), Math::DivideAndRoundUp(data.Height, 8u));
-            context->ResetUA();
-            context->ResetSR();
-        }
-        if (useReceiverTiles)
-        {
-            PROFILE_GPU_CPU_NAMED("V2 Shadow Receiver Tile Max");
-            context->BindSR(7,CandidateOccluderDepth);
-            context->BindSR(24,CameraReceiverMask);
-            context->BindSR(25,CameraReceiverNear);
-            context->BindSR(26,CameraReceiverFar);
-            context->BindUA(0,CameraReceiverTileMax->View());
-            context->Dispatch(tileReceivers,tileResolution,tileResolution);
-            context->ResetUA();
-            context->ResetSR();
-        }
-        {
-            PROFILE_GPU_CPU_NAMED("V2 Shadow Receiver Mask Caster Gate");
-            LastSelectionDispatchCount++;
-            context->BindSR(3, BoundsBuffer->View());
-            context->BindSR(7, CandidateOccluderDepth);
-            context->BindSR(21, LightVisibilityBuffer->View());
-            context->BindSR(24, CameraReceiverMask);
-            context->BindSR(25, CameraReceiverNear);
-            context->BindSR(26, CameraReceiverFar);
-            context->BindSR(28,useReceiverTiles ? CameraReceiverTileMax : nullptr);
-            context->BindUA(0, CameraReceiverCasters->View());
-            context->Dispatch(intersectReceivers, data.GroupsPerRow, Math::DivideAndRoundUp(data.CasterCount, data.GroupsPerRow));
-            context->ResetUA();
-            context->ResetSR();
-        }
-        resources.SetOutput(TEXT("Shadow.CameraReceiverCoverage"), CameraReceiverMask);
-        resources.SetOutput(TEXT("Shadow.CameraReceiverNear"), CameraReceiverNear);
-        resources.SetOutput(TEXT("Shadow.CameraReceiverFar"), CameraReceiverFar);
-        resources.SetOutput(TEXT("Shadow.CameraReceiverCasters"), CameraReceiverCasters);
-        if (useReceiverTiles) resources.SetOutput(TEXT("Shadow.CameraReceiverTileMax"),CameraReceiverTileMax);
     }
-
-    // The shared receiver gate is the final selection. If its light map could
-    // not be built, retain the conservative light-visibility flags instead.
+    if (prepared)
     {
-        PROFILE_GPU_CPU_NAMED("V2 Shadow Publish Receiver Mask Selection");
-        context->CopyBuffer(SelectionBuffer, candidateData.HasLightDepth ? CameraReceiverCasters : LightVisibilityBuffer, count * sizeof(uint32));
+        PROFILE_GPU_CPU_NAMED("V2 Reuse Light Selection");
+        context->CopyBuffer(SelectionBuffer, prepared->Flags, count * sizeof(uint32));
         LastUsedSelection = true;
+        LastReceiverWidth = prepared->ReceiverWidth;
+        LastReceiverHeight = prepared->ReceiverHeight;
+    }
+    else
+    {
+        constexpr int32 selectionMapResolution = 1024;
+        // Build selection depth once. Final shadow bands share a separate high-resolution depth draw.
+        SelectionConstants candidateData = data;
+        candidateData.HasLightDepth = 0;
+        candidateData.ShadowSplit = Float4::Zero;
+        candidateData.ReceiverRange = Float4::Zero;
+        candidateData.FilterRadius = 0;
+        if (lightDepth)
+        {
+            if (!CandidateOccluderDepth)
+                CandidateOccluderDepth = device->CreateTexture(TEXT("V2 Candidate Occluder Depth"));
+            const bool ready = CandidateOccluderDepth &&
+                ((CandidateOccluderDepth->Width() == selectionMapResolution && CandidateOccluderDepth->GetMemoryUsage() &&
+                    (!ProjectedView || CandidateOccluderDepth->Format() == PixelFormat::D32_Float)) ||
+                    InitShadowDepthMap(device, CandidateOccluderDepth, selectionMapResolution, 0, ProjectedView != nullptr) != 0);
+            if (ready)
+            {
+                PROFILE_GPU_CPU_NAMED("V2 Shadow Candidate Occluders");
+                auto* savedDepth = lightDepth;
+                const auto savedViewport = tileViewports[0];
+                const auto savedBounds = nearBounds;
+                auto& candidateContext = lightContexts[0];
+                const auto savedView = candidateContext.View;
+                const Float3 minimum = Float3(lightBounds.Minimum) - Float3::One;
+                const Float3 maximum = Float3(lightBounds.Maximum) + Float3::One;
+                Matrix projection;
+                if (ProjectedView) projection = ProjectedView->Projection;
+                else Matrix::OrthoOffCenter(minimum.X, maximum.X, minimum.Y, maximum.Y, minimum.Z, maximum.Z, projection);
+                lightDepth = CandidateOccluderDepth;
+                tileViewports[0] = Viewport(0, 0, (float)selectionMapResolution, (float)selectionMapResolution);
+                nearBounds = BoundingBox(Vector3(minimum), Vector3(maximum));
+                candidateContext.Buffers = LightDepthBuffers;
+                candidateContext.View.Pass = DrawPass::Depth;
+                candidateContext.View.Flags = ViewFlags::None;
+                candidateContext.View.Direction = direction;
+                candidateContext.View.SetUp(lightView, projection);
+                candidateContext.View.PrevViewProjection = candidateContext.View.ViewProjection();
+                candidateContext.View.Near = ProjectedView ? ProjectedView->Near : minimum.Z;
+                candidateContext.View.Far = ProjectedView ? ProjectedView->Far : maximum.Z;
+                if (ProjectedView)
+                {
+                    candidateContext.View.Position = ProjectedView->Position;
+                    candidateContext.View.Origin = ProjectedView->Origin;
+                }
+                candidateContext.View.PrepareCache(candidateContext, (float)selectionMapResolution, (float)selectionMapResolution, Float2::Zero);
+                context->ClearDepth(CandidateOccluderDepth->View());
+                drawShadowDepth(0, false, nullptr, false);
+                Matrix::Transpose(candidateContext.View.ViewProjection(), candidateData.LightViewProjection);
+                // The shared selection pass uses this otherwise unused tier matrix
+                // to reconstruct light-space texel rays through each real box.
+                Matrix inverseLight;
+                Matrix::Invert(candidateContext.View.ViewProjection(), inverseLight);
+                Matrix::Transpose(inverseLight, candidateData.NearLightViewProjection);
+                candidateData.ShadowTiles[0] = Float4(0, 0, (float)selectionMapResolution, (float)selectionMapResolution);
+                candidateData.ShadowSplit.W = GetShadowDepthPrecisionBias(CandidateOccluderDepth->Format());
+                candidateData.HasLightDepth = 1;
+                candidateData.ReceiverRange.Z = maximum.Z - minimum.Z;
+                lightDepth = savedDepth;
+                tileViewports[0] = savedViewport;
+                nearBounds = savedBounds;
+                candidateContext.View = savedView;
+                resources.SetOutput(TEXT("Shadow.CandidateOccluderDepth"), CandidateOccluderDepth);
+            }
+        }
+        // Step 1: prove light occlusion against real cheap geometry. The result is
+        // independent of camera visibility and shared by every cascade.
+        {
+            PROFILE_GPU_CPU_NAMED("V2 Shadow 1 Light Visibility");
+            auto* lightVisibility = SelectionShader->GPU->GetCS("CS_V2LightCasterVisibility");
+            if (!lightVisibility)
+                return StageResult::Failed;
+            context->UpdateCB(constants, &candidateData);
+            context->BindCB(1, constants);
+            context->BindSR(3, BoundsBuffer->View());
+            context->BindSR(7, candidateData.HasLightDepth ? CandidateOccluderDepth : depth);
+            context->BindSR(29, cameraVisibility ? cameraVisibility->View() : nullptr);
+            context->BindUA(0, LightVisibilityBuffer->View());
+            context->Dispatch(lightVisibility, data.GroupsPerRow, Math::DivideAndRoundUp(data.CasterCount, data.GroupsPerRow));
+            context->ResetUA();
+            context->ResetSR();
+            resources.SetOutput(TEXT("Shadow.LightVisibility"), LightVisibilityBuffer);
+        }
+
+        // Reproject camera-visible opaque surfaces ONCE into the shared light map.
+        // Atomic min/max preserve multiple receiver depths per texel. No CPU readback.
+        // The scatter visits camera pixels once; map/caster tests use the fixed 1024 map.
+        if (candidateData.HasLightDepth)
+        {
+            auto initReceiverMap = [&](GPUTexture*& texture, const Char* name)
+            {
+                if (!texture)
+                    texture = device->CreateTexture(name);
+                return texture && ((texture->Width() == selectionMapResolution && texture->GetMemoryUsage()) ||
+                    !texture->Init(GPUTextureDescription::New2D(selectionMapResolution, selectionMapResolution,
+                        PixelFormat::R32_UInt, GPUTextureFlags::ShaderResource | GPUTextureFlags::UnorderedAccess)));
+            };
+            if (!initReceiverMap(CameraReceiverMask, TEXT("V2 Camera Receivers Light Coverage")) ||
+                !initReceiverMap(CameraReceiverNear, TEXT("V2 Camera Receivers Near Depth")) ||
+                !initReceiverMap(CameraReceiverFar, TEXT("V2 Camera Receivers Far Depth")))
+                return StageResult::Failed;
+            if (!CameraReceiverCasters)
+                CameraReceiverCasters = device->CreateBuffer(TEXT("V2 Camera Receiver Caster Candidates"));
+            if (!CameraReceiverCasters || (CameraReceiverCasters->GetElementsCount() < (uint32)count &&
+                CameraReceiverCasters->Init(GPUBufferDescription::Structured(count, sizeof(uint32), true))))
+                return StageResult::Failed;
+            // Avoid paying a whole-map reduction for a few small projected boxes.
+            // This upper-bound scan estimate uses bounds already transformed for fitting;
+            // it never reads GPU results back to the CPU.
+            double projectedScanTexels = 0;
+            const Float3 lightExtent = Float3(lightBounds.Maximum - lightBounds.Minimum) + Float3(2.0f);
+            for (int32 i = 0; i < count; i++)
+            {
+                if (!bounds[i].UseProxy)
+                    continue;
+                const Float3 extent = Float3(lightCasterBounds[i].Maximum - lightCasterBounds[i].Minimum);
+                const float width = Math::Min((float)selectionMapResolution, extent.X / lightExtent.X * selectionMapResolution + 4.0f);
+                const float height = Math::Min((float)selectionMapResolution, extent.Y / lightExtent.Y * selectionMapResolution + 4.0f);
+                projectedScanTexels += (double)width * height;
+            }
+            const bool useReceiverTiles = ProjectedView || projectedScanTexels >= (double)selectionMapResolution * selectionMapResolution;
+            const int32 tileResolution = Math::DivideAndRoundUp(selectionMapResolution,8);
+            if (useReceiverTiles)
+            {
+                if (!CameraReceiverTileMax)
+                    CameraReceiverTileMax = device->CreateTexture(TEXT("V2 Receiver Tile Maximum"));
+                if (!CameraReceiverTileMax || ((CameraReceiverTileMax->Width() != tileResolution || !CameraReceiverTileMax->GetMemoryUsage()) &&
+                    CameraReceiverTileMax->Init(GPUTextureDescription::New2D(tileResolution,tileResolution,PixelFormat::R32_UInt,
+                        GPUTextureFlags::ShaderResource | GPUTextureFlags::UnorderedAccess))))
+                    return StageResult::Failed;
+            }
+            auto* tileReceivers = SelectionShader->GPU->GetCS("CS_V2ReceiverTileMax");
+            auto* projectReceivers = SelectionShader->GPU->GetCS("CS_V2ProjectCameraReceivers");
+            auto* intersectReceivers = SelectionShader->GPU->GetCS("CS_V2ReceiverMaskCasters");
+            if (!projectReceivers || !intersectReceivers || (useReceiverTiles && !tileReceivers))
+                return StageResult::Failed;
+            const uint32 clear[4] = {};
+            const uint32 emptyNear[4] = { MAX_uint32, MAX_uint32, MAX_uint32, MAX_uint32 };
+            context->ResetRenderTarget();
+            context->ResetSR();
+            context->ResetUA();
+            context->ClearUA(CameraReceiverMask, clear);
+            context->ClearUA(CameraReceiverNear, emptyNear);
+            context->ClearUA(CameraReceiverFar, clear);
+            if (useReceiverTiles) candidateData.CasterDebugFlags |= 262144u;
+            context->UpdateCB(constants, &candidateData);
+            context->BindCB(1, constants);
+            {
+                PROFILE_GPU_CPU_NAMED("V2 Shadow Camera To Light Receivers");
+                context->BindSR(2, depth);
+                context->BindSR(7, CandidateOccluderDepth);
+                context->BindSR(8, receiverNormals ? receiverNormals : depth);
+                context->BindUA(0, CameraReceiverMask->View());
+                context->BindUA(1, CameraReceiverNear->View());
+                context->BindUA(2, CameraReceiverFar->View());
+                context->Dispatch(projectReceivers, Math::DivideAndRoundUp(data.Width, 8u), Math::DivideAndRoundUp(data.Height, 8u));
+                context->ResetUA();
+                context->ResetSR();
+            }
+            if (useReceiverTiles)
+            {
+                PROFILE_GPU_CPU_NAMED("V2 Shadow Receiver Tile Max");
+                context->BindSR(7,CandidateOccluderDepth);
+                context->BindSR(24,CameraReceiverMask);
+                context->BindSR(25,CameraReceiverNear);
+                context->BindSR(26,CameraReceiverFar);
+                context->BindUA(0,CameraReceiverTileMax->View());
+                context->Dispatch(tileReceivers,tileResolution,tileResolution);
+                context->ResetUA();
+                context->ResetSR();
+            }
+            {
+                PROFILE_GPU_CPU_NAMED("V2 Shadow Receiver Mask Caster Gate");
+                LastSelectionDispatchCount++;
+                context->BindSR(3, BoundsBuffer->View());
+                context->BindSR(7, CandidateOccluderDepth);
+                context->BindSR(21, LightVisibilityBuffer->View());
+                context->BindSR(24, CameraReceiverMask);
+                context->BindSR(25, CameraReceiverNear);
+                context->BindSR(26, CameraReceiverFar);
+                context->BindSR(28,useReceiverTiles ? CameraReceiverTileMax : nullptr);
+                context->BindSR(29, cameraVisibility ? cameraVisibility->View() : nullptr);
+                context->BindUA(0, CameraReceiverCasters->View());
+                context->Dispatch(intersectReceivers, data.GroupsPerRow, Math::DivideAndRoundUp(data.CasterCount, data.GroupsPerRow));
+                context->ResetUA();
+                context->ResetSR();
+            }
+            resources.SetOutput(TEXT("Shadow.CameraReceiverCoverage"), CameraReceiverMask);
+            resources.SetOutput(TEXT("Shadow.CameraReceiverNear"), CameraReceiverNear);
+            resources.SetOutput(TEXT("Shadow.CameraReceiverFar"), CameraReceiverFar);
+            resources.SetOutput(TEXT("Shadow.CameraReceiverCasters"), CameraReceiverCasters);
+            if (useReceiverTiles) resources.SetOutput(TEXT("Shadow.CameraReceiverTileMax"),CameraReceiverTileMax);
+        }
+
+        // The shared receiver gate is the final selection. If its light map could
+        // not be built, retain the conservative light-visibility flags instead.
+        {
+            PROFILE_GPU_CPU_NAMED("V2 Shadow Publish Receiver Mask Selection");
+            context->CopyBuffer(SelectionBuffer, candidateData.HasLightDepth ? CameraReceiverCasters : LightVisibilityBuffer, count * sizeof(uint32));
+            LastUsedSelection = true;
+        }
+    }
+    if (selectionOnly)
+    {
+        if (PreparedSelectionCount == PreparedSelections.Count())
+            PreparedSelections.Add(PreparedSelection());
+        auto& entry = PreparedSelections[PreparedSelectionCount];
+        if (!entry.Flags) entry.Flags = device->CreateBuffer(TEXT("V2 Prepared Light Selection"));
+        if (!entry.Flags || (entry.Flags->GetElementsCount() < (uint32)count &&
+            entry.Flags->Init(GPUBufferDescription::Structured(count, sizeof(uint32), true))))
+            return StageResult::Failed;
+        context->CopyBuffer(entry.Flags, SelectionBuffer, count * sizeof(uint32));
+        entry.Projection = selectionProjectionKey;
+        entry.Distance = ProjectionDistance;
+        entry.Perspective = ProjectedView != nullptr;
+        entry.ReceiverWidth = depth->Width();
+        entry.ReceiverHeight = depth->Height();
+        entry.Objects = Casters;
+        PreparedSelectionCount++;
+        LastCasterCount = count;
+        return StageResult::Completed;
     }
     resources.SetOutput(TEXT("Shadow.VisibleShadowCasters"), SelectionBuffer);
 
@@ -1036,13 +1312,35 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         }
     };
 
-    auto* resolveConstants = SelectionShader->GPU->GetCB(3);
+    if (ProjectedView)
+    {
+        PROFILE_GPU_CPU_NAMED("V2 Projected Selected Shadow Geometry");
+        drawSelectedDepth(1);
+        ProjectedResult = lightDepth;
+        LastCasterCount = count;
+        resources.SetOutput(TEXT("ProjectedLight.CasterSelection"), SelectionBuffer);
+        resources.SetOutput(TEXT("SpotLight.CasterSelection"), SelectionBuffer);
+        resources.SetOutput(TEXT("SpotLight.ReceiverCoverage"), CameraReceiverMask);
+        return StageResult::Completed;
+    }
+
+    if (!LightingShader)
+    {
+        LightingShader = Content::LoadAsyncInternal<Shader>(TEXT("Shaders/Utils/DirectionalLight"));
+        if (LightingShader)
+            LightingShader->Reloading.Bind<ShadowBoxCasterStage, &ShadowBoxCasterStage::OnShaderReloading>(this);
+    }
+    if (!LightingShader || !LightingShader->IsLoaded() || !LightingShader->GPU)
+        return StageResult::Skipped;
+
+    auto* resolveConstants = LightingShader->GPU->GetCB(3);
     const bool haveResolveConstants = resolveConstants && resolveConstants->GetSize() == sizeof(ResolveConstants);
     ResolveConstants resolve = {};
     resolve.InverseViewProjection = data.InverseViewProjection;
     resolve.LightViewProjection = data.LightViewProjection;
     resolve.DirectionToLight = data.DirectionToLight;
-    resolve.AmbientIntensity = AmbientIntensity;
+    resolve.AmbientIntensity = 0.0f;
+    resolve.DebugOptions.Y = 1.0f; // Direct-light accumulation: base/ambient/emissive were drawn once.
     resolve.ShadowSampling.X = smoothShadows ? 1.0f : 0.0f;
     resolve.ShadowSampling.Y = 0.0f;
     resolve.DebugOptions.X = 
@@ -1067,7 +1365,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
     const auto preparePass = [&](GPUPipelineState*& state, GPUTexture*& target, const char* entry,
                                  const Char* name, PixelFormat format, bool blend = false)
     {
-        auto* pixelShader = SelectionShader->GPU->GetPS(entry);
+        auto* pixelShader = LightingShader->GPU->GetPS(entry);
         if (!pixelShader)
             return false;
         if (!state)
@@ -1136,7 +1434,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
             resources.SetOutput(TEXT("Shadow.Visibility"), visibilityTexture);
         }
 
-        context->SetState(ResolveState);
+        context->SetState(blockerDebugRequested || blurDebugRequested || contactDebugRequested ? BaseLightingState : ResolveState);
         context->DrawFullscreenTriangle();
         context->ResetRenderTarget();
         context->ResetSR();
@@ -1317,7 +1615,68 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
                         BandDepthMaps.RemoveAt(i);
                     }
                 }
-                for (int32 i = slices.Count() - 1; i >= 0; i--)
+                // Normal visibility needs one receiver reconstruction per pixel/light,
+                // not a fullscreen draw per cascade. Diagnostics keep the reference path.
+                bool combinedResolved = false;
+                if (!showCascadeVisualization &&
+                    preparePass(CombinedCascadeMaskState, ShadowMask, "PS_V2CombinedShadowMask",
+                        TEXT("V2 Shadow Mask"), PixelFormat::R16G16_Float, true))
+                {
+                    Array<CascadeResolveData, InlinedAllocation<8>> bands;
+                    for (const auto& slice : slices)
+                    {
+                        auto* bandDepth = slice.Depth ? slice.Depth : lightDepth;
+                        const float size = (float)bandDepth->Width();
+                        const float texel = Math::Max(maximum.X - minimum.X, maximum.Y - minimum.Y) / size;
+                        CascadeResolveData band;
+                        band.Range = slice.Range;
+                        band.Sampling = Float4(size, GetShadowDepthPrecisionBias(bandDepth->Format()) +
+                            slice.Parameters.X * texel / (maximum.Z - minimum.Z), slice.Parameters.Y * texel, slice.Filter.AdaptiveRadius);
+                        const Float2 footprint = GetBandDepthFootprint(bandDepth);
+                        band.Footprint = Float4(footprint.X, footprint.Y, slice.Parameters.Z, 0);
+                        bands.Add(band);
+                    }
+                    if (!CascadeResolveSettings)
+                        CascadeResolveSettings = device->CreateBuffer(TEXT("V2 Cascade Resolve Settings"));
+                    if (CascadeResolveSettings && (CascadeResolveSettings->GetElementsCount() >= (uint32)bands.Count() ||
+                        !CascadeResolveSettings->Init(GPUBufferDescription::Structured(bands.Count(), sizeof(CascadeResolveData)))))
+                    {
+                        context->UpdateBuffer(CascadeResolveSettings, bands.Get(), bands.Count() * sizeof(CascadeResolveData));
+                        // Four maps per draw bound register/code pressure on SM5.
+                        // Larger configurations use more groups, never drop bands.
+                        for (int32 group = (slices.Count() - 1) / 4; group >= 0; group--)
+                        {
+                            PROFILE_GPU_CPU_NAMED("V2 Shadow Resolve Combined Mask");
+                            const int32 first = group * 4;
+                            const int32 count = Math::Min(4, slices.Count() - first);
+                            ResolveConstants combined = resolve;
+                            combined.LightViewProjection = data.LightViewProjection;
+                            combined.CascadeRange.X = (float)first;
+                            combined.CascadeRange.W = (float)count;
+                            combined.ShadowFilter.X = maximum.Z - minimum.Z;
+                            combined.BlockerParameters.X = 0;
+                            context->UpdateCB(resolveConstants, &combined);
+                            context->BindCB(3, resolveConstants);
+                            context->BindSR(0, BlurBandSettings->View());
+                            context->BindSR(1, CascadeResolveSettings->View());
+                            context->BindSR(2, depth);
+                            context->BindSR(8, receiverNormals);
+                            for (int32 i = 0; i < count; i++)
+                            {
+                                auto* bandDepth = slices[first + i].Depth;
+                                context->BindSR(20 + i, bandDepth ? bandDepth : lightDepth);
+                            }
+                            context->SetViewportAndScissors((float)depth->Width(), (float)depth->Height());
+                            context->SetRenderTarget(ShadowMask->View());
+                            context->SetState(CombinedCascadeMaskState);
+                            context->DrawFullscreenTriangle();
+                            context->ResetRenderTarget();
+                            context->ResetSR();
+                        }
+                        combinedResolved = true;
+                    }
+                }
+                for (int32 i = combinedResolved ? -1 : slices.Count() - 1; i >= 0; i--)
                 {
                     PROFILE_GPU_CPU_NAMED("V2 Shadow Band Resolve");
                     const auto& slice = slices[i];
@@ -1381,7 +1740,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
         auto* baseColor = resources.Get<GPUTexture>(TEXT("Scene.BaseColor"));
         auto* material = resources.Get<GPUTexture>(TEXT("Scene.Material"));
         auto* emissive = resources.Get<GPUTexture>(TEXT("Scene.Emissive"));
-        auto* pixelShader = SelectionShader->GPU->GetPS("PS_V2DirectionalLighting");
+        auto* pixelShader = LightingShader->GPU->GetPS("PS_V2DirectionalLighting");
         if (baseColor && receiverNormals && material && emissive && pixelShader && haveResolveConstants)
         {
             if (!ResolveState)
@@ -1390,7 +1749,8 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
             {
                 auto desc = GPUPipelineState::Description::DefaultFullscreenTriangle;
                 desc.PS = pixelShader;
-                desc.BlendMode = BlendingMode::AlphaBlend;
+                desc.BlendMode = BlendingMode::Add;
+                desc.BlendMode.RenderTargetWriteMask = BlendingMode::ColorWrite::RGB;
                 ResolveState->Init(desc);
             }
             if (ResolveState && ResolveState->IsValid())
@@ -1470,5 +1830,7 @@ StageResult ShadowBoxCasterStage::Render(GPUContext* context, Array<IVisualData*
 
 void ShadowBoxCasterStage::OnEndFrame(GPUContext* context)
 {
+    PreparedSelectionCount = 0;
+    for (auto& entry : PreparedSelections) entry.Objects.Clear();
     Casters.Clear();
 }

@@ -75,6 +75,10 @@ public:
     API_FIELD(Attributes="EditorOrder(-10), EditorDisplay(\"Shadows\", \"Rendering\")")
     ShadowRenderingMode ShadowRendering = ShadowRenderingMode::Smooth;
 
+    /// <summary>Resolution of each point-light shadow face. Six faces share one array per rendered light.</summary>
+    API_FIELD(Attributes="EditorDisplay(\"Shadows\", \"Point Face Resolution\"), Limit(512, 16384, 512)")
+    int32 PointShadowMapResolution = 1024;
+
     /// <summary>Square resolution of the one directional-light depth map shared by all bands.</summary>
     API_FIELD(Attributes="EditorOrder(0), EditorDisplay(\"Shadows\", \"Depth Resolution\"), Limit(512, 16384, 512)")
     int32 ShadowDepthResolution = 2048;
@@ -82,6 +86,10 @@ public:
     /// <summary>Radial shadow bands in increasing end-distance order. The final band covers the remaining view. Empty uses one unbanded map.</summary>
     API_FIELD(Attributes="EditorOrder(10), EditorDisplay(\"Shadows\", \"Shadow Distance Settings\")")
     Array<ShadowCascadeSettings> ShadowCascades;
+
+    /// <summary>Directional light to inspect when any shadow/light debug view is enabled. Other lights are omitted from that diagnostic view.</summary>
+    API_FIELD(Attributes="EditorOrder(129), EditorDisplay(\"Debug\", \"Directional Light Index\"), Limit(0)")
+    int32 DebugDirectionalLightIndex = 0;
 
     /// <summary>Displays blur bands by receiver-to-blocker distance along the light ray, using the cascade palette. Blue-black means no blocker; magenta means outside light coverage. Enable Shadow Cascades too to overlay white cascade ends and dark cascade blend-start contours.</summary>
     API_FIELD(Attributes="EditorOrder(131), EditorDisplay(\"Debug\", \"Blur Bands\")")

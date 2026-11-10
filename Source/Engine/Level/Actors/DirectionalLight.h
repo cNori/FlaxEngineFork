@@ -3,12 +3,13 @@
 #pragma once
 
 #include "Light.h"
+#include "Engine/Graphics/RendererV2/ILightData.h"
 
 /// <summary>
 /// Directional light emits light from direction in space.
 /// </summary>
 API_CLASS(Attributes="ActorContextMenu(\"New/Lights/Directional Light\"), ActorToolbox(\"Lights\")")
-class FLAXENGINE_API DirectionalLight : public LightWithShadow
+class FLAXENGINE_API DirectionalLight : public LightWithShadow, public ILightData
 {
     DECLARE_SCENE_OBJECT(DirectionalLight);
 public:
@@ -62,6 +63,13 @@ public:
 
 public:
     // [LightWithShadow]
+    void Collect(RenderCollectionContext& context) override;
+    RenderLightKind GetILD_Type() const override { return RenderLightKind::Directional; }
+    Vector3 GetILD_Direction() const override { return GetForward(); }
+    ::Color GetILD_Color() const override { return Color; }
+    float GetILD_Intensity() const override { return Brightness; }
+    Vector3 GetILD_WorldPosition() const override { return GetPosition(); }
+    float GetILD_Range() const override { return MAX_float; }
     void Draw(RenderContextBatch& renderContextBatch) override;
     void Serialize(SerializeStream& stream, const void* otherObj) override;
     void Deserialize(DeserializeStream& stream, ISerializeModifier* modifier) override;

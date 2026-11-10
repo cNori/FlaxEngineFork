@@ -95,6 +95,12 @@ public:
     void Draw(RenderContextBatch& renderContextBatch) override;
     void Collect(RenderCollectionContext& context) override;
 
+    ::Color GetILD_Color() const override { return Color; }
+    float GetILD_Intensity() const override { return ComputeBrightness(); }
+    bool GetILD_InverseSquaredFalloff() const override { return UseInverseSquaredFalloff; }
+    float GetILD_FalloffExponent() const override { return FallOffExponent; }
+    bool GetILD_CastShadows() const override { return EnumHasAnyFlags(ShadowsMode, ShadowsCastingMode::DynamicOnly); }
+    float GetILD_ShadowStrength() const override { return ShadowsStrength; }
     Vector3 GetILD_WorldPosition() const override { return GetPosition(); }
     float GetILD_Range() const override { return GetScaledRadius(); }
 #if USE_EDITOR

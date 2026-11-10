@@ -17,7 +17,9 @@ API_CLASS() class FLAXENGINE_API RenderPipelineDrawStage : public RenderPipeline
     DECLARE_SCRIPTING_TYPE(RenderPipelineDrawStage);
 private:
     RenderBuffers* MaterialBuffers = nullptr;
+    RenderBuffers* ReceiverBuffers = nullptr;
     GPUTexture* EmissiveBuffer = nullptr;
+    StageResult RenderGeometry(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources, bool depthOnly);
     AssetReference<Shader> CullingShader;
     GPUBuffer* IndirectInputs = nullptr;
     GPUBuffer* IndirectOutput = nullptr;
@@ -26,5 +28,8 @@ private:
     void BuildIndirectDraws(GPUContext* context, GPUBuffer* visibility, RenderList* list, const Array<uint32>& objectIndices);
 public:
     ~RenderPipelineDrawStage();
+    /// <summary>Builds receiver depth without evaluating opaque material colours. Masked/deformed materials retain their depth shader.</summary>
+    StageResult RenderDepth(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources);
+
     StageResult Render(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources) override;
 };

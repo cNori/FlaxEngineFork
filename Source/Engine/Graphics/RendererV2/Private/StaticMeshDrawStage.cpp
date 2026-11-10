@@ -31,6 +31,8 @@ RenderPipelineDrawStage::~RenderPipelineDrawStage()
     SAFE_DELETE_GPU_RESOURCE(IndirectArguments);
     if (MaterialBuffers)
         Delete(MaterialBuffers);
+    if (ReceiverBuffers)
+        Delete(ReceiverBuffers);
 }
 
 void RenderPipelineDrawStage::BuildIndirectDraws(GPUContext* context, GPUBuffer* visibility, RenderList* list, const Array<uint32>& objectIndices)
@@ -96,6 +98,16 @@ void RenderPipelineDrawStage::BuildIndirectDraws(GPUContext* context, GPUBuffer*
 
 StageResult RenderPipelineDrawStage::Render(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources)
 {
+    return RenderGeometry(context, objects, viewpoint, resources, false);
+}
+
+StageResult RenderPipelineDrawStage::RenderDepth(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources)
+{
+    return RenderGeometry(context, objects, viewpoint, resources, true);
+}
+
+StageResult RenderPipelineDrawStage::RenderGeometry(GPUContext* context, Array<IVisualData*>& objects, ICamera*& viewpoint, RenderResourceTable& resources, bool depthOnly)
+{
     auto* color = resources.Get<GPUTexture>(TEXT("Scene.Color"));
     const auto* warpedView = dynamic_cast<WarpedViewpoint*>(viewpoint);
     if (!color || !warpedView)
@@ -106,32 +118,40 @@ StageResult RenderPipelineDrawStage::Render(GPUContext* context, Array<IVisualDa
     if (context != device->GetMainContext())
         return StageResult::Failed;
 
-    if (!MaterialBuffers)
-        MaterialBuffers = New<RenderBuffers>();
-    if (MaterialBuffers->Init(color->Width(), color->Height()))
+    auto*& buffers = depthOnly ? ReceiverBuffers : MaterialBuffers;
+    const float selectionScale = depthOnly ? Math::Min(1.0f, 1024.0f / Math::Max(color->Width(), color->Height())) : 1.0f;
+    const int32 width = Math::Max(1, (int32)(color->Width() * selectionScale));
+    const int32 height = Math::Max(1, (int32)(color->Height() * selectionScale));
+    if (!buffers)
+        buffers = New<RenderBuffers>();
+    if (buffers->Init(width, height))
     {
-        Delete(MaterialBuffers);
-        MaterialBuffers = nullptr;
+        Delete(buffers);
+        buffers = nullptr;
         return StageResult::Failed;
     }
 
-    if (!EmissiveBuffer)
-        EmissiveBuffer = device->CreateTexture(TEXT("V2 Material Emissive"));
-    if (!EmissiveBuffer)
-        return StageResult::Failed;
-    if (EmissiveBuffer->Width() != color->Width() || EmissiveBuffer->Height() != color->Height() || !EmissiveBuffer->GetMemoryUsage())
+    if (!depthOnly)
     {
-        const auto desc = GPUTextureDescription::New2D(color->Width(), color->Height(),
-            PixelFormat::R16G16B16A16_Float, GPUTextureFlags::ShaderResource | GPUTextureFlags::RenderTarget);
-        if (EmissiveBuffer->Init(desc))
+        if (!EmissiveBuffer)
+            EmissiveBuffer = device->CreateTexture(TEXT("V2 Material Emissive"));
+        if (!EmissiveBuffer)
             return StageResult::Failed;
+        if (EmissiveBuffer->Width() != color->Width() || EmissiveBuffer->Height() != color->Height() || !EmissiveBuffer->GetMemoryUsage())
+        {
+            const auto desc = GPUTextureDescription::New2D(color->Width(), color->Height(),
+                PixelFormat::R16G16B16A16_Float, GPUTextureFlags::ShaderResource | GPUTextureFlags::RenderTarget);
+            if (EmissiveBuffer->Init(desc))
+                return StageResult::Failed;
+        }
+
     }
 
     RenderContext materialContext;
-    materialContext.Buffers = MaterialBuffers;
+    materialContext.Buffers = buffers;
     materialContext.List = RenderList::GetFromPool();
     auto& view = materialContext.View;
-    view.Pass = DrawPass::GBuffer;
+    view.Pass = depthOnly ? DrawPass::Depth : DrawPass::GBuffer;
     view.Flags = ViewFlags::None;
     view.SetUp(warpedView->View, warpedView->Projection);
     view.Position = Float3(warpedView->LocalTransform.Translation);
@@ -145,7 +165,7 @@ StageResult RenderPipelineDrawStage::Render(GPUContext* context, Array<IVisualDa
         view.Far = camera->GetFarPlane();
     }
     view.PrevViewProjection = view.ViewProjection();
-    view.PrepareCache(materialContext, (float)color->Width(), (float)color->Height(), Float2::Zero);
+    view.PrepareCache(materialContext, (float)width, (float)height, Float2::Zero);
     materialContext.List->Init(materialContext);
 
     auto* visibility = resources.Get<GPUBuffer>(TEXT("Occlusion.Visibility"));
@@ -186,7 +206,7 @@ StageResult RenderPipelineDrawStage::Render(GPUContext* context, Array<IVisualDa
 
             const int32 firstDraw = materialContext.List->DrawCalls.Count();
             mesh.Draw(materialContext, material, warped->WorldMatrix,
-                      actor->GetStaticFlags(), false, DrawPass::GBuffer, actor->GetPerInstanceRandom());
+                      actor->GetStaticFlags(), false, view.Pass, actor->GetPerInstanceRandom());
             if (visibility)
             {
                 const int32 endDraw = materialContext.List->DrawCalls.Count();
@@ -201,22 +221,37 @@ StageResult RenderPipelineDrawStage::Render(GPUContext* context, Array<IVisualDa
     context->ResetUA();
     if (visibility)
         BuildIndirectDraws(context, visibility, materialContext.List, objectIndices);
-    constexpr auto listType = DrawCallsListType::GBufferNoDecals;
+    const auto listType = depthOnly ? DrawCallsListType::Depth : DrawCallsListType::GBufferNoDecals;
     if (!materialContext.List->DrawCallsLists[(int32)listType].IsEmpty())
-        materialContext.List->SortDrawCalls(materialContext, false, listType, DrawPass::GBuffer);
+        materialContext.List->SortDrawCalls(materialContext, false, listType, view.Pass);
 
+    context->SetViewportAndScissors(buffers->GetViewport());
+    if (depthOnly)
+    {
+        PROFILE_GPU_CPU_NAMED("V2 Receiver Depth");
+        context->ClearDepth(buffers->DepthBuffer->View());
+        context->SetRenderTarget(buffers->DepthBuffer->View(), static_cast<GPUTextureView*>(nullptr));
+        materialContext.List->ExecuteDrawCalls(materialContext, listType);
+        context->ResetRenderTarget();
+        RenderList::ReturnToPool(materialContext.List);
+        resources.Set(TEXT("Scene.Depth"), buffers->DepthBuffer);
+        resources.SetOutput(TEXT("Depth"), buffers->DepthBuffer);
+        return StageResult::Completed;
+    }
+    // Existing material PSOs use strict depth comparison, so they rebuild depth.
+    // The early depth remains valid for selection until this point.
     GBufferPass::Instance()->Fill(materialContext, EmissiveBuffer);
     RenderList::ReturnToPool(materialContext.List);
 
     // Preview the material base color until the pipeline has a lighting pass.
     context->ResetSR();
-    context->Draw(color, MaterialBuffers->GBuffer0);
+    context->Draw(color, buffers->GBuffer0);
     context->ResetSR();
-    resources.Set(TEXT("Scene.Depth"), MaterialBuffers->DepthBuffer);
-    resources.Set(TEXT("Scene.Normals"), MaterialBuffers->GBuffer1);
-    resources.Set(TEXT("Scene.BaseColor"), MaterialBuffers->GBuffer0);
-    resources.Set(TEXT("Scene.Material"), MaterialBuffers->GBuffer2);
+    resources.Set(TEXT("Scene.Depth"), buffers->DepthBuffer);
+    resources.Set(TEXT("Scene.Normals"), buffers->GBuffer1);
+    resources.Set(TEXT("Scene.BaseColor"), buffers->GBuffer0);
+    resources.Set(TEXT("Scene.Material"), buffers->GBuffer2);
     resources.Set(TEXT("Scene.Emissive"), EmissiveBuffer);
-    resources.SetOutput(TEXT("Depth"), MaterialBuffers->DepthBuffer);
+    resources.SetOutput(TEXT("Depth"), buffers->DepthBuffer);
     return StageResult::Completed;
 }
